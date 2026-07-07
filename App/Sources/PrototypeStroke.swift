@@ -4,17 +4,23 @@ import Model
 
 /// Throwaway Phase 0 stroke. The real `Stroke` model (SPEC §6) with tools,
 /// undo, and persistence arrives in Phase 1.
-struct PrototypePoint {
+struct PrototypePoint: Codable {
     /// Canvas space, always — converted at capture time (SPEC §5).
     var position: CanvasPoint
     /// Raw `UITouch.force`; 0 for finger/mouse input.
     var force: CGFloat
 }
 
-struct PrototypeStroke {
-    let id = UUID()
+struct PrototypeStroke: Codable {
+    let id: UUID
     var points: [PrototypePoint]
     var style: PrototypeToolStyle
+
+    init(id: UUID = UUID(), points: [PrototypePoint], style: PrototypeToolStyle) {
+        self.id = id
+        self.points = points
+        self.style = style
+    }
 
     var renderWidth: CGFloat { style.width }
 

@@ -1,25 +1,38 @@
 import SwiftUI
 
 protocol Theme: Sendable {
+    @MainActor
     func button(_ label: String, action: @escaping () -> Void) -> AnyView
+    @MainActor
+    func menu(_ label: String, actions: [AppMenuAction]) -> AnyView
+    @MainActor
     func icon(_ source: IconSource, size: CGFloat) -> AnyView
+    @MainActor
     func iconButton(
         _ source: IconSource,
         title: String,
         isSelected: Bool,
         action: @escaping () -> Void
     ) -> AnyView
+    @MainActor
     func colorSwatch(
         _ color: Color,
         title: String,
         isSelected: Bool,
         action: @escaping () -> Void
     ) -> AnyView
+    @MainActor
     func toggle(_ isOn: Binding<Bool>, label: String) -> AnyView
 }
 
 enum IconSource: Hashable, Sendable {
     case systemSymbol(String)
+}
+
+struct AppMenuAction: Identifiable {
+    let id: String
+    let title: String
+    let action: () -> Void
 }
 
 struct SystemTheme: Theme {
@@ -28,6 +41,22 @@ struct SystemTheme: Theme {
             Button(label, action: action)
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+        )
+    }
+
+    func menu(_ label: String, actions: [AppMenuAction]) -> AnyView {
+        AnyView(
+            Menu(label) {
+                if actions.isEmpty {
+                    Text("No saved notes")
+                } else {
+                    ForEach(actions) { action in
+                        Button(action.title, action: action.action)
+                    }
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         )
     }
 
@@ -130,6 +159,17 @@ struct AppButton: View {
 
     var body: some View {
         theme.button(label, action: action)
+    }
+}
+
+struct AppMenuButton: View {
+    @Environment(\.theme) private var theme
+
+    let label: String
+    let actions: [AppMenuAction]
+
+    var body: some View {
+        theme.menu(label, actions: actions)
     }
 }
 

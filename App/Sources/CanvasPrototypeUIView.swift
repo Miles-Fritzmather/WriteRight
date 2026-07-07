@@ -29,9 +29,12 @@ final class CanvasPrototypeUIView: UIView {
     private var activeToolStyle: PrototypeToolStyle?
     private var predictedPoints: [PrototypePoint] = []
     private var eraserPreviewPoint: CanvasPoint?
+    private var activeEraserRemovedStrokes: [IndexedStroke] = []
     private var strokeLayers: [UUID: CAShapeLayer] = [:]
     private var activeStrokeLayer: CAShapeLayer?
     private var eraserPreviewLayer: CAShapeLayer?
+    private var undoStack: [CanvasAction] = []
+    private var redoStack: [CanvasAction] = []
 
     private let canvasLayer = CALayer()
     private let hudUpdateInterval: CFTimeInterval = 1.0 / 15.0
@@ -53,10 +56,22 @@ final class CanvasPrototypeUIView: UIView {
     private let panRecognizer = UIPanGestureRecognizer()
     private let pinchRecognizer = UIPinchGestureRecognizer()
     private let rotationRecognizer = UIRotationGestureRecognizer()
+    private let undoRecognizer = UITapGestureRecognizer()
+    private let redoRecognizer = UITapGestureRecognizer()
 
     private enum ActiveInput {
         case drawing
         case erasing
+    }
+
+    private enum CanvasAction {
+        case add(PrototypeStroke)
+        case remove([IndexedStroke])
+    }
+
+    private struct IndexedStroke {
+        let stroke: PrototypeStroke
+        let index: Int
     }
 
     // MARK: Setup
@@ -71,22 +86,31 @@ final class CanvasPrototypeUIView: UIView {
         canvasLayer.anchorPoint = .zero
         canvasLayer.position = .zero
         canvasLayer.masksToBounds = false
-        canvasLayer.contentsScale = UIScreen.main.scale
+        canvasLayer.contentsScale = traitCollection.displayScale
 
         panRecognizer.addTarget(self, action: #selector(handlePan(_:)))
         panRecognizer.minimumNumberOfTouches = 1
         panRecognizer.maximumNumberOfTouches = 2
         pinchRecognizer.addTarget(self, action: #selector(handlePinch(_:)))
         rotationRecognizer.addTarget(self, action: #selector(handleRotation(_:)))
+        undoRecognizer.addTarget(self, action: #selector(handleUndoTap(_:)))
+        undoRecognizer.numberOfTouchesRequired = 2
+        undoRecognizer.numberOfTapsRequired = 2
+        undoRecognizer.cancelsTouchesInView = false
+        redoRecognizer.addTarget(self, action: #selector(handleRedoTap(_:)))
+        redoRecognizer.numberOfTouchesRequired = 3
+        redoRecognizer.numberOfTapsRequired = 2
+        redoRecognizer.cancelsTouchesInView = false
 
         // Navigation is finger-only; pencil touches fall through to the
         // touches* overrides below and always draw.
         let fingerOnly = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
-        for recognizer in [panRecognizer, pinchRecognizer, rotationRecognizer] {
+        for recognizer in [panRecognizer, pinchRecognizer, rotationRecognizer, undoRecognizer, redoRecognizer] {
             recognizer.allowedTouchTypes = fingerOnly
             recognizer.delegate = self
             addGestureRecognizer(recognizer)
         }
+        undoRecognizer.require(toFail: redoRecognizer)
     }
 
     @available(*, unavailable)
@@ -123,6 +147,8 @@ final class CanvasPrototypeUIView: UIView {
             layer.removeFromSuperlayer()
         }
         strokeLayers.removeAll()
+        undoStack.removeAll()
+        redoStack.removeAll()
         activeStrokeLayer?.removeFromSuperlayer()
         activeStrokeLayer = nil
         removeEraserPreview()
@@ -132,8 +158,30 @@ final class CanvasPrototypeUIView: UIView {
         activeToolStyle = nil
         predictedPoints = []
         eraserPreviewPoint = nil
+        activeEraserRemovedStrokes = []
         setNeedsDisplay()
         noteChanged(force: true)
+    }
+
+    func makeNoteDocument(id: UUID, title: String, createdAt: Date) -> PrototypeNoteDocument {
+        cancelActiveInputForHistoryGesture()
+        let now = Date()
+        return PrototypeNoteDocument(
+            id: id,
+            title: title,
+            createdAt: createdAt,
+            updatedAt: now,
+            camera: PrototypeCameraSnapshot(camera: camera),
+            strokes: strokes
+        )
+    }
+
+    func loadNote(_ note: PrototypeNoteDocument) {
+        replaceCanvas(strokes: note.strokes, camera: note.camera.camera)
+    }
+
+    func startBlankNote() {
+        replaceCanvas(strokes: [], camera: defaultCamera)
     }
 
     private func noteChanged(force: Bool = false) {
@@ -169,6 +217,16 @@ final class CanvasPrototypeUIView: UIView {
         recognizer.rotation = 0
     }
 
+    @objc private func handleUndoTap(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .recognized else { return }
+        undo()
+    }
+
+    @objc private func handleRedoTap(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .recognized else { return }
+        redo()
+    }
+
     // MARK: Pencil input → canvas-space strokes
 
     private func isDrawingTouch(_ touch: UITouch) -> Bool {
@@ -184,6 +242,7 @@ final class CanvasPrototypeUIView: UIView {
         let firstSample = sample(touch)
         if style.kind == .eraser {
             activeInput = .erasing
+            activeEraserRemovedStrokes = []
             eraserPreviewPoint = firstSample.position
             updateEraserPreview(at: firstSample.position, radius: style.width / 2)
             erase(at: [firstSample], radius: style.width / 2)
@@ -239,6 +298,9 @@ final class CanvasPrototypeUIView: UIView {
             if let activeStrokeLayer {
                 strokeLayers[stroke.id] = activeStrokeLayer
             }
+            record(.add(stroke))
+        } else if activeInput == .erasing, !activeEraserRemovedStrokes.isEmpty {
+            record(.remove(activeEraserRemovedStrokes))
         } else {
             activeStrokeLayer?.removeFromSuperlayer()
         }
@@ -249,6 +311,7 @@ final class CanvasPrototypeUIView: UIView {
         activeStrokeLayer = nil
         predictedPoints = []
         eraserPreviewPoint = nil
+        activeEraserRemovedStrokes = []
         removeEraserPreview()
         noteChanged(force: true)
     }
@@ -285,12 +348,42 @@ final class CanvasPrototypeUIView: UIView {
 
     private func makeStrokeLayer(for stroke: PrototypeStroke) -> CAShapeLayer {
         let layer = CAShapeLayer()
-        layer.contentsScale = window?.screen.scale ?? UIScreen.main.scale
+        layer.contentsScale = traitCollection.displayScale
         layer.lineCap = .round
         layer.lineJoin = .round
         layer.masksToBounds = false
         updateStrokeLayer(layer, for: stroke)
         return layer
+    }
+
+    private func replaceCanvas(strokes newStrokes: [PrototypeStroke], camera newCamera: Camera) {
+        cancelActiveInputForHistoryGesture()
+        for layer in strokeLayers.values {
+            layer.removeFromSuperlayer()
+        }
+        strokeLayers.removeAll()
+        undoStack.removeAll()
+        redoStack.removeAll()
+        activeStrokeLayer?.removeFromSuperlayer()
+        activeStrokeLayer = nil
+        removeEraserPreview()
+
+        strokes = []
+        for stroke in newStrokes {
+            addStrokeWithoutHistory(stroke, at: strokes.count)
+        }
+        camera = newCamera
+        noteChanged(force: true)
+    }
+
+    private func addStrokeWithoutHistory(_ stroke: PrototypeStroke, at index: Int) {
+        let insertionIndex = min(max(index, 0), strokes.count)
+        strokes.insert(stroke, at: insertionIndex)
+        let strokeLayer = makeStrokeLayer(for: stroke)
+        strokeLayers[stroke.id] = strokeLayer
+        withoutLayerActions {
+            insertLayer(strokeLayer, forStrokeAt: insertionIndex)
+        }
     }
 
     private func updateActiveStrokeLayer() {
@@ -350,7 +443,7 @@ final class CanvasPrototypeUIView: UIView {
 
     private func makeEraserPreviewLayer() -> CAShapeLayer {
         let layer = CAShapeLayer()
-        layer.contentsScale = window?.screen.scale ?? UIScreen.main.scale
+        layer.contentsScale = traitCollection.displayScale
         layer.fillColor = UIColor.label.withAlphaComponent(0.06).cgColor
         layer.strokeColor = UIColor.label.withAlphaComponent(0.45).cgColor
         layer.lineWidth = 1
@@ -369,24 +462,133 @@ final class CanvasPrototypeUIView: UIView {
         CATransaction.commit()
     }
 
-    private func erase(at samples: [PrototypePoint], radius: CGFloat) {
-        guard !samples.isEmpty else { return }
-        let previousCount = strokes.count
-        var removedIDs: [UUID] = []
-        strokes.removeAll { stroke in
-            let shouldRemove = samples.contains { sample in
-                stroke.contains(sample.position, eraserRadius: radius)
-            }
-            if shouldRemove {
-                removedIDs.append(stroke.id)
-            }
-            return shouldRemove
+    private func record(_ action: CanvasAction) {
+        undoStack.append(action)
+        redoStack.removeAll()
+    }
+
+    private func undo() {
+        cancelActiveInputForHistoryGesture()
+        guard let action = undoStack.popLast() else { return }
+        applyInverse(action)
+        redoStack.append(action)
+        noteChanged(force: true)
+    }
+
+    private func redo() {
+        cancelActiveInputForHistoryGesture()
+        guard let action = redoStack.popLast() else { return }
+        apply(action)
+        undoStack.append(action)
+        noteChanged(force: true)
+    }
+
+    private func apply(_ action: CanvasAction) {
+        switch action {
+        case .add(let stroke):
+            addStroke(stroke, at: strokes.count)
+        case .remove(let indexedStrokes):
+            removeStrokes(withIDs: indexedStrokes.map(\.stroke.id))
         }
-        for id in removedIDs {
+    }
+
+    private func applyInverse(_ action: CanvasAction) {
+        switch action {
+        case .add(let stroke):
+            removeStrokes(withIDs: [stroke.id])
+        case .remove(let indexedStrokes):
+            restore(indexedStrokes)
+        }
+    }
+
+    private func addStroke(_ stroke: PrototypeStroke, at index: Int) {
+        let insertionIndex = min(max(index, 0), strokes.count)
+        strokes.insert(stroke, at: insertionIndex)
+        let strokeLayer = makeStrokeLayer(for: stroke)
+        strokeLayers[stroke.id] = strokeLayer
+        withoutLayerActions {
+            insertLayer(strokeLayer, forStrokeAt: insertionIndex)
+        }
+    }
+
+    private func restore(_ indexedStrokes: [IndexedStroke]) {
+        for indexedStroke in indexedStrokes.sorted(by: { $0.index < $1.index }) {
+            addStroke(indexedStroke.stroke, at: indexedStroke.index)
+        }
+    }
+
+    private func removeStrokes(withIDs ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        let ids = Set(ids)
+        strokes.removeAll { ids.contains($0.id) }
+        for id in ids {
             withoutLayerActions {
                 strokeLayers[id]?.removeFromSuperlayer()
             }
             strokeLayers.removeValue(forKey: id)
+        }
+    }
+
+    private func insertLayer(_ layer: CALayer, forStrokeAt index: Int) {
+        if index >= canvasLayer.sublayers?.count ?? 0 {
+            canvasLayer.addSublayer(layer)
+            return
+        }
+
+        let followingLayer = strokes.dropFirst(index + 1)
+            .lazy
+            .compactMap { [self] in strokeLayers[$0.id] }
+            .first
+
+        if let followingLayer {
+            canvasLayer.insertSublayer(layer, below: followingLayer)
+        } else {
+            canvasLayer.addSublayer(layer)
+        }
+    }
+
+    private func cancelActiveInputForHistoryGesture() {
+        guard activeInput != nil else { return }
+
+        if activeInput == .drawing {
+            withoutLayerActions {
+                activeStrokeLayer?.removeFromSuperlayer()
+            }
+        } else if activeInput == .erasing, !activeEraserRemovedStrokes.isEmpty {
+            restore(activeEraserRemovedStrokes)
+        }
+
+        activeStroke = nil
+        activeTouch = nil
+        activeInput = nil
+        activeToolStyle = nil
+        activeStrokeLayer = nil
+        predictedPoints = []
+        eraserPreviewPoint = nil
+        activeEraserRemovedStrokes = []
+        removeEraserPreview()
+    }
+
+    private func erase(at samples: [PrototypePoint], radius: CGFloat) {
+        guard !samples.isEmpty else { return }
+        let previousCount = strokes.count
+        var removed: [IndexedStroke] = []
+        strokes = strokes.enumerated().compactMap { index, stroke in
+            let shouldRemove = samples.contains { sample in
+                stroke.contains(sample.position, eraserRadius: radius)
+            }
+            if shouldRemove {
+                removed.append(IndexedStroke(stroke: stroke, index: index))
+                return nil
+            }
+            return stroke
+        }
+        activeEraserRemovedStrokes.append(contentsOf: removed)
+        for indexedStroke in removed {
+            withoutLayerActions {
+                strokeLayers[indexedStroke.stroke.id]?.removeFromSuperlayer()
+            }
+            strokeLayers.removeValue(forKey: indexedStroke.stroke.id)
         }
         if strokes.count != previousCount {
             noteChanged(force: true)

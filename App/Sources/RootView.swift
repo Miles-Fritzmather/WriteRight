@@ -2,8 +2,8 @@ import Inject
 import SwiftUI
 
 /// Phase 0 shell: a full-bleed prototype canvas plus a small debug HUD.
-/// Plain SwiftUI controls on purpose — the Theme abstraction (SPEC §7)
-/// arrives with Phase 1, and this whole screen is throwaway.
+/// The HUD now uses the Phase 1 Theme wrappers even though the canvas
+/// remains prototype code.
 struct RootView: View {
     @ObserveInjection var inject
     @State private var model = PrototypeCanvasModel()
@@ -30,11 +30,23 @@ private struct PrototypeHUD: View {
     @Bindable var model: PrototypeCanvasModel
 
     var body: some View {
+        let loadActions = model.noteSummaries.map { summary in
+            AppMenuAction(
+                id: summary.id.uuidString,
+                title: "\(summary.title) · \(summary.strokeCount) strokes"
+            ) {
+                model.loadNote(summary)
+            }
+        }
+
         VStack(alignment: .leading, spacing: 6) {
             Text("Phase 0 — canvas & camera prototype")
                 .font(.caption.weight(.semibold))
             Text("Zoom \(Int((model.scale * 100).rounded()))%  ·  Rotation \(Int(model.rotationDegrees.rounded()))°  ·  Strokes \(model.strokeCount)")
                 .font(.caption.monospacedDigit())
+            Text(model.currentNoteTitle)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
             Text("Pencil draws · 1–2 fingers pan · pinch zooms · twist rotates")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -44,6 +56,18 @@ private struct PrototypeHUD: View {
                 AppToggle(isOn: $model.fingerDrawing, label: "Finger draws")
             }
             .font(.caption)
+            HStack(spacing: 10) {
+                AppButton(label: "New note") { model.newNote() }
+                AppButton(label: "Save") { model.saveNote() }
+                AppMenuButton(label: "Load", actions: loadActions)
+            }
+            .font(.caption)
+            if let storageMessage = model.storageMessage {
+                Text(storageMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
         .padding(12)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))

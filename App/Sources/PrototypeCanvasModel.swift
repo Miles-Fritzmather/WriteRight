@@ -1,5 +1,6 @@
 import CanvasCore
 import CoreGraphics
+import Foundation
 import Observation
 import UIKit
 
@@ -14,8 +15,23 @@ final class PrototypeCanvasModel {
     var selectedTool: PrototypeToolKind = .pen
     var selectedInkColor: PrototypeInkColor = .black
     var selectedHighlighterColor: PrototypeInkColor = .yellow
+    var noteSummaries: [PrototypeNoteSummary] = []
+    var currentNoteTitle: String
+    var storageMessage: String?
 
     weak var canvasView: CanvasPrototypeUIView?
+
+    private let noteStore = PrototypeNoteStore()
+    private var currentNoteID: UUID
+    private var currentNoteCreatedAt: Date
+
+    init() {
+        let now = Date()
+        currentNoteID = UUID()
+        currentNoteCreatedAt = now
+        currentNoteTitle = Self.defaultTitle(for: now)
+        refreshNotes()
+    }
 
     func resetCamera() { canvasView?.resetCamera() }
     func clearInk() { canvasView?.clearInk() }
@@ -46,6 +62,65 @@ final class PrototypeCanvasModel {
         }
     }
 
+    func newNote() {
+        let now = Date()
+        currentNoteID = UUID()
+        currentNoteCreatedAt = now
+        currentNoteTitle = Self.defaultTitle(for: now)
+        canvasView?.startBlankNote()
+        storageMessage = "New note ready"
+    }
+
+    func saveNote() {
+        guard let canvasView else {
+            storageMessage = "Canvas is not ready"
+            return
+        }
+
+        do {
+            let note = canvasView.makeNoteDocument(
+                id: currentNoteID,
+                title: currentNoteTitle,
+                createdAt: currentNoteCreatedAt
+            )
+            try noteStore.save(note)
+            currentNoteCreatedAt = note.createdAt
+            currentNoteTitle = note.title
+            refreshNotes()
+            storageMessage = "Saved \(note.title)"
+        } catch {
+            storageMessage = "Save failed: \(error.localizedDescription)"
+        }
+    }
+
+    func loadNote(_ summary: PrototypeNoteSummary) {
+        guard let canvasView else {
+            storageMessage = "Canvas is not ready"
+            return
+        }
+
+        do {
+            let note = try noteStore.load(id: summary.id)
+            currentNoteID = note.id
+            currentNoteCreatedAt = note.createdAt
+            currentNoteTitle = note.title
+            canvasView.loadNote(note)
+            refreshNotes()
+            storageMessage = "Loaded \(note.title)"
+        } catch {
+            storageMessage = "Load failed: \(error.localizedDescription)"
+        }
+    }
+
+    func refreshNotes() {
+        do {
+            noteSummaries = try noteStore.listNotes()
+        } catch {
+            noteSummaries = []
+            storageMessage = "Could not list notes: \(error.localizedDescription)"
+        }
+    }
+
     /// Called at up to 120 Hz during gestures; writes only on real change
     /// so SwiftUI isn't invalidated needlessly.
     func apply(camera: Camera, strokeCount: Int) {
@@ -58,5 +133,12 @@ final class PrototypeCanvasModel {
         if degrees != rotationDegrees { rotationDegrees = degrees }
 
         if strokeCount != self.strokeCount { self.strokeCount = strokeCount }
+    }
+
+    private static func defaultTitle(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return "Note \(formatter.string(from: date))"
     }
 }

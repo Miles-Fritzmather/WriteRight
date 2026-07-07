@@ -2,7 +2,7 @@ import CoreGraphics
 import SwiftUI
 import UIKit
 
-enum PrototypeToolKind: String, CaseIterable, Identifiable {
+enum PrototypeToolKind: String, CaseIterable, Codable, Identifiable {
     case pen
     case pencil
     case marker
@@ -32,7 +32,7 @@ enum PrototypeToolKind: String, CaseIterable, Identifiable {
     }
 }
 
-struct PrototypeInkColor: Hashable, Identifiable {
+struct PrototypeInkColor: Codable, Hashable, Identifiable {
     let id: String
     let name: String
     let red: CGFloat
@@ -62,13 +62,56 @@ struct PrototypeInkColor: Hashable, Identifiable {
     static let highlighterPalette: [PrototypeInkColor] = [.yellow, .mint, .pink, .lavender]
 }
 
-struct PrototypeToolStyle: Equatable {
+struct PrototypeToolStyle: Codable, Equatable {
     let kind: PrototypeToolKind
     let color: PrototypeInkColor
     let width: CGFloat
     let opacity: CGFloat
     let pressureSensitive: Bool
     let blendMode: CGBlendMode
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case color
+        case width
+        case opacity
+        case pressureSensitive
+    }
+
+    init(
+        kind: PrototypeToolKind,
+        color: PrototypeInkColor,
+        width: CGFloat,
+        opacity: CGFloat,
+        pressureSensitive: Bool,
+        blendMode: CGBlendMode
+    ) {
+        self.kind = kind
+        self.color = color
+        self.width = width
+        self.opacity = opacity
+        self.pressureSensitive = pressureSensitive
+        self.blendMode = blendMode
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decode(PrototypeToolKind.self, forKey: .kind)
+        color = try container.decode(PrototypeInkColor.self, forKey: .color)
+        width = try container.decode(CGFloat.self, forKey: .width)
+        opacity = try container.decode(CGFloat.self, forKey: .opacity)
+        pressureSensitive = try container.decode(Bool.self, forKey: .pressureSensitive)
+        blendMode = kind == .highlighter ? .multiply : .normal
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(color, forKey: .color)
+        try container.encode(width, forKey: .width)
+        try container.encode(opacity, forKey: .opacity)
+        try container.encode(pressureSensitive, forKey: .pressureSensitive)
+    }
 
     static let `default` = PrototypeToolStyle(
         kind: .pen,
