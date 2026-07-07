@@ -1,21 +1,22 @@
 import CanvasCore
 import Model
+import QuartzCore
 import UIKit
 
 /// Phase 0 prototype canvas (SPEC §8 — throwaway by design).
 ///
 /// Captures Apple Pencil input into canvas space at the moment each sample
-/// arrives (SPEC §5) and redraws everything through the camera transform
-/// with plain Core Graphics. Deliberately unoptimized: PencilKit live ink
-/// arrives in Phase 1, tiled rendering in Phase 3. What this screen proves
-/// is the coordinate discipline — ink drawn while panned/zoomed/rotated
-/// must land exactly where the pencil touches.
+/// arrives (SPEC §5). Strokes render as cached vector layers under a parent
+/// canvas transform, so camera gestures move the environment without
+/// re-stroking every point. PencilKit live ink arrives in Phase 1, tiled
+/// rendering in Phase 3.
 final class CanvasPrototypeUIView: UIView {
 
     // MARK: State
 
     private(set) var camera = Camera() {
         didSet {
+            updateCanvasLayerTransform()
             setNeedsDisplay()
             noteChanged()
         }
@@ -28,6 +29,13 @@ final class CanvasPrototypeUIView: UIView {
     private var activeToolStyle: PrototypeToolStyle?
     private var predictedPoints: [PrototypePoint] = []
     private var eraserPreviewPoint: CanvasPoint?
+    private var strokeLayers: [UUID: CAShapeLayer] = [:]
+    private var activeStrokeLayer: CAShapeLayer?
+    private var eraserPreviewLayer: CAShapeLayer?
+
+    private let canvasLayer = CALayer()
+    private let hudUpdateInterval: CFTimeInterval = 1.0 / 15.0
+    private var lastHUDUpdateTime: CFTimeInterval = 0
 
     /// Lets a finger (or the simulator's mouse) draw. While enabled,
     /// panning needs two fingers so drawing and panning don't fight.
@@ -59,6 +67,11 @@ final class CanvasPrototypeUIView: UIView {
         isOpaque = true
         backgroundColor = UIColor(red: 0.99, green: 0.985, blue: 0.97, alpha: 1)
         contentMode = .redraw
+        layer.addSublayer(canvasLayer)
+        canvasLayer.anchorPoint = .zero
+        canvasLayer.position = .zero
+        canvasLayer.masksToBounds = false
+        canvasLayer.contentsScale = UIScreen.main.scale
 
         panRecognizer.addTarget(self, action: #selector(handlePan(_:)))
         panRecognizer.minimumNumberOfTouches = 1
@@ -85,10 +98,13 @@ final class CanvasPrototypeUIView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        layoutCanvasLayer()
         // Start with the canvas origin centered so the grid axes are visible.
         if !hasSetInitialCamera, bounds.width > 0 {
             hasSetInitialCamera = true
             camera = defaultCamera
+        } else {
+            updateCanvasLayerTransform()
         }
     }
 
@@ -96,10 +112,20 @@ final class CanvasPrototypeUIView: UIView {
         Camera(translation: CGVector(dx: bounds.midX, dy: bounds.midY))
     }
 
-    func resetCamera() { camera = defaultCamera }
+    func resetCamera() {
+        camera = defaultCamera
+        noteChanged(force: true)
+    }
 
     func clearInk() {
         strokes.removeAll()
+        for layer in strokeLayers.values {
+            layer.removeFromSuperlayer()
+        }
+        strokeLayers.removeAll()
+        activeStrokeLayer?.removeFromSuperlayer()
+        activeStrokeLayer = nil
+        removeEraserPreview()
         activeStroke = nil
         activeTouch = nil
         activeInput = nil
@@ -107,10 +133,13 @@ final class CanvasPrototypeUIView: UIView {
         predictedPoints = []
         eraserPreviewPoint = nil
         setNeedsDisplay()
-        noteChanged()
+        noteChanged(force: true)
     }
 
-    private func noteChanged() {
+    private func noteChanged(force: Bool = false) {
+        let now = CACurrentMediaTime()
+        guard force || now - lastHUDUpdateTime >= hudUpdateInterval else { return }
+        lastHUDUpdateTime = now
         onChange?(camera, strokes.count)
     }
 
@@ -156,12 +185,19 @@ final class CanvasPrototypeUIView: UIView {
         if style.kind == .eraser {
             activeInput = .erasing
             eraserPreviewPoint = firstSample.position
+            updateEraserPreview(at: firstSample.position, radius: style.width / 2)
             erase(at: [firstSample], radius: style.width / 2)
         } else {
             activeInput = .drawing
             activeStroke = PrototypeStroke(points: [firstSample], style: style)
+            if let activeStroke {
+                let layer = makeStrokeLayer(for: activeStroke)
+                activeStrokeLayer = layer
+                withoutLayerActions {
+                    canvasLayer.addSublayer(layer)
+                }
+            }
         }
-        setNeedsDisplay()
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -171,14 +207,17 @@ final class CanvasPrototypeUIView: UIView {
 
         switch activeInput {
         case .drawing:
-            activeStroke?.points.append(contentsOf: samples)
+            activeStroke?.append(samples)
             predictedPoints = (event?.predictedTouches(for: touch) ?? []).map(sample)
+            updateActiveStrokeLayer()
         case .erasing:
             predictedPoints = []
             eraserPreviewPoint = samples.last?.position
+            if let point = eraserPreviewPoint {
+                updateEraserPreview(at: point, radius: (activeToolStyle ?? toolStyle).width / 2)
+            }
             erase(at: samples, radius: (activeToolStyle ?? toolStyle).width / 2)
         }
-        setNeedsDisplay()
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -194,16 +233,24 @@ final class CanvasPrototypeUIView: UIView {
     private func finishStroke(_ touches: Set<UITouch>) {
         guard let touch = activeTouch, touches.contains(touch) else { return }
         if activeInput == .drawing, let stroke = activeStroke, !stroke.points.isEmpty {
+            predictedPoints = []
+            updateStrokeLayer(activeStrokeLayer, for: stroke)
             strokes.append(stroke)
+            if let activeStrokeLayer {
+                strokeLayers[stroke.id] = activeStrokeLayer
+            }
+        } else {
+            activeStrokeLayer?.removeFromSuperlayer()
         }
         activeStroke = nil
         activeTouch = nil
         activeInput = nil
         activeToolStyle = nil
+        activeStrokeLayer = nil
         predictedPoints = []
         eraserPreviewPoint = nil
-        setNeedsDisplay()
-        noteChanged()
+        removeEraserPreview()
+        noteChanged(force: true)
     }
 
     /// SPEC §5: every sample is converted to canvas space at capture time,
@@ -220,78 +267,129 @@ final class CanvasPrototypeUIView: UIView {
         ctx.saveGState()
         ctx.concatenate(camera.transform)
         drawGrid(ctx)
-        for stroke in strokes {
-            draw(stroke, in: ctx)
-        }
-        if var live = activeStroke {
-            // Predicted samples render as part of the live stroke and are
-            // replaced by real ones on the next event.
-            live.points.append(contentsOf: predictedPoints)
-            draw(live, in: ctx)
-        }
-        if let eraserPreviewPoint {
-            drawEraserPreview(at: eraserPreviewPoint, in: ctx)
-        }
         ctx.restoreGState()
     }
 
-    private func draw(_ stroke: PrototypeStroke, in ctx: CGContext) {
-        guard stroke.style.kind != .eraser else { return }
-        let color = stroke.style.color.uiColor(alpha: stroke.style.opacity)
-        ctx.saveGState()
-        ctx.setBlendMode(stroke.style.blendMode)
-        ctx.setStrokeColor(color.cgColor)
-        ctx.setFillColor(color.cgColor)
-        ctx.setLineCap(.round)
-        ctx.setLineJoin(.round)
+    private func layoutCanvasLayer() {
+        withoutLayerActions {
+            canvasLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+            canvasLayer.position = .zero
+        }
+    }
 
-        let points = stroke.points
-        guard points.count > 1 else {
-            if let p = points.first {
-                let r = stroke.width(for: p.force) / 2
-                ctx.fillEllipse(in: CGRect(x: p.position.x - r, y: p.position.y - r, width: r * 2, height: r * 2))
+    private func updateCanvasLayerTransform() {
+        withoutLayerActions {
+            canvasLayer.setAffineTransform(camera.transform)
+        }
+    }
+
+    private func makeStrokeLayer(for stroke: PrototypeStroke) -> CAShapeLayer {
+        let layer = CAShapeLayer()
+        layer.contentsScale = window?.screen.scale ?? UIScreen.main.scale
+        layer.lineCap = .round
+        layer.lineJoin = .round
+        layer.masksToBounds = false
+        updateStrokeLayer(layer, for: stroke)
+        return layer
+    }
+
+    private func updateActiveStrokeLayer() {
+        guard let activeStroke else { return }
+        updateStrokeLayer(activeStrokeLayer, for: activeStroke, include: predictedPoints)
+    }
+
+    private func updateStrokeLayer(
+        _ layer: CAShapeLayer?,
+        for stroke: PrototypeStroke,
+        include predictedPoints: [PrototypePoint] = []
+    ) {
+        guard let layer else { return }
+        let renderBounds = stroke.renderBounds(include: predictedPoints)
+        guard !renderBounds.isNull else { return }
+
+        let color = stroke.style.color.uiColor(alpha: 1)
+        withoutLayerActions {
+            layer.frame = renderBounds
+            layer.path = stroke.layerPath(include: predictedPoints)
+            layer.opacity = Float(stroke.style.opacity)
+            layer.lineWidth = stroke.renderWidth
+
+            if stroke.points.count + predictedPoints.count == 1 {
+                layer.fillColor = color.cgColor
+                layer.strokeColor = nil
+            } else {
+                layer.fillColor = nil
+                layer.strokeColor = color.cgColor
             }
-            ctx.restoreGState()
-            return
         }
-        // Per-segment widths so pressure reads; round caps hide the joins.
-        for i in 1..<points.count {
-            ctx.setLineWidth(stroke.width(for: points[i].force))
-            ctx.move(to: points[i - 1].position.cgPoint)
-            ctx.addLine(to: points[i].position.cgPoint)
-            ctx.strokePath()
-        }
-        ctx.restoreGState()
     }
 
-    private func drawEraserPreview(at point: CanvasPoint, in ctx: CGContext) {
-        let radius = (activeToolStyle ?? toolStyle).width / 2
-        ctx.saveGState()
-        ctx.setBlendMode(.normal)
-        ctx.setLineWidth(1 / camera.scale)
-        ctx.setStrokeColor(UIColor.label.withAlphaComponent(0.45).cgColor)
-        ctx.setFillColor(UIColor.label.withAlphaComponent(0.06).cgColor)
-        let rect = CGRect(
-            x: point.x - radius,
-            y: point.y - radius,
-            width: radius * 2,
-            height: radius * 2
+    private func updateEraserPreview(at point: CanvasPoint, radius: CGFloat) {
+        let previewLayer = eraserPreviewLayer ?? makeEraserPreviewLayer()
+        eraserPreviewLayer = previewLayer
+        if previewLayer.superlayer == nil {
+            withoutLayerActions {
+                canvasLayer.addSublayer(previewLayer)
+            }
+        }
+
+        let frame = CGRect(
+            x: point.x - Double(radius),
+            y: point.y - Double(radius),
+            width: Double(radius * 2),
+            height: Double(radius * 2)
         )
-        ctx.fillEllipse(in: rect)
-        ctx.strokeEllipse(in: rect)
-        ctx.restoreGState()
+        let path = CGMutablePath()
+        path.addEllipse(in: CGRect(origin: .zero, size: frame.size))
+
+        withoutLayerActions {
+            previewLayer.frame = frame
+            previewLayer.path = path
+        }
+    }
+
+    private func makeEraserPreviewLayer() -> CAShapeLayer {
+        let layer = CAShapeLayer()
+        layer.contentsScale = window?.screen.scale ?? UIScreen.main.scale
+        layer.fillColor = UIColor.label.withAlphaComponent(0.06).cgColor
+        layer.strokeColor = UIColor.label.withAlphaComponent(0.45).cgColor
+        layer.lineWidth = 1
+        return layer
+    }
+
+    private func removeEraserPreview() {
+        eraserPreviewLayer?.removeFromSuperlayer()
+        eraserPreviewLayer = nil
+    }
+
+    private func withoutLayerActions(_ updates: () -> Void) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        updates()
+        CATransaction.commit()
     }
 
     private func erase(at samples: [PrototypePoint], radius: CGFloat) {
         guard !samples.isEmpty else { return }
         let previousCount = strokes.count
+        var removedIDs: [UUID] = []
         strokes.removeAll { stroke in
-            samples.contains { sample in
+            let shouldRemove = samples.contains { sample in
                 stroke.contains(sample.position, eraserRadius: radius)
             }
+            if shouldRemove {
+                removedIDs.append(stroke.id)
+            }
+            return shouldRemove
+        }
+        for id in removedIDs {
+            withoutLayerActions {
+                strokeLayers[id]?.removeFromSuperlayer()
+            }
+            strokeLayers.removeValue(forKey: id)
         }
         if strokes.count != previousCount {
-            noteChanged()
+            noteChanged(force: true)
         }
     }
 

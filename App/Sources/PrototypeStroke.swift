@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import Model
 
 /// Throwaway Phase 0 stroke. The real `Stroke` model (SPEC §6) with tools,
@@ -11,12 +12,68 @@ struct PrototypePoint {
 }
 
 struct PrototypeStroke {
+    let id = UUID()
     var points: [PrototypePoint]
     var style: PrototypeToolStyle
 
+    var renderWidth: CGFloat { style.width }
+
+    var renderBounds: CGRect {
+        renderBounds(for: points)
+    }
+
+    mutating func append(_ samples: [PrototypePoint]) {
+        for sample in samples {
+            append(sample)
+        }
+    }
+
+    func layerPath(include predictedPoints: [PrototypePoint] = []) -> CGPath {
+        let allPoints = points + predictedPoints
+        let bounds = renderBounds(for: allPoints)
+        let path = CGMutablePath()
+        guard let first = allPoints.first else { return path }
+
+        if allPoints.count == 1 {
+            let radius = renderWidth / 2
+            path.addEllipse(in: CGRect(
+                x: first.position.x - bounds.minX - radius,
+                y: first.position.y - bounds.minY - radius,
+                width: radius * 2,
+                height: radius * 2
+            ))
+            return path
+        }
+
+        path.move(to: localPoint(first.position, in: bounds))
+
+        // Smooth the stored polyline into one stroked path instead of
+        // issuing one draw call per segment.
+        for index in 1..<allPoints.count {
+            let previous = allPoints[index - 1].position
+            let current = allPoints[index].position
+            let midpoint = CanvasPoint(
+                x: (previous.x + current.x) / 2,
+                y: (previous.y + current.y) / 2
+            )
+            path.addQuadCurve(
+                to: localPoint(midpoint, in: bounds),
+                control: localPoint(previous, in: bounds)
+            )
+        }
+
+        if let last = allPoints.last {
+            path.addLine(to: localPoint(last.position, in: bounds))
+        }
+        return path
+    }
+
+    func renderBounds(include predictedPoints: [PrototypePoint] = []) -> CGRect {
+        renderBounds(for: points + predictedPoints)
+    }
+
     func width(for force: CGFloat) -> CGFloat {
-        guard style.pressureSensitive, force > 0 else { return style.width }
-        return style.width * min(max(0.35 + 0.65 * force, 0.25), 2.5)
+        renderWidth
     }
 
     func contains(_ point: CanvasPoint, eraserRadius: CGFloat) -> Bool {
@@ -37,6 +94,50 @@ struct PrototypeStroke {
         }
         return false
     }
+
+    private mutating func append(_ sample: PrototypePoint) {
+        guard let last = points.last else {
+            points.append(sample)
+            return
+        }
+
+        if distance(last.position.cgPoint, to: sample.position.cgPoint) >= minStoredPointDistance {
+            points.append(sample)
+        } else if points.count == 1 {
+            points[0] = sample
+        }
+    }
+
+    private var minStoredPointDistance: CGFloat {
+        max(0.75, min(renderWidth * 0.18, 3))
+    }
+
+    private func renderBounds(for points: [PrototypePoint]) -> CGRect {
+        guard let first = points.first else { return .null }
+        var minX = first.position.x
+        var minY = first.position.y
+        var maxX = first.position.x
+        var maxY = first.position.y
+
+        for point in points.dropFirst() {
+            minX = min(minX, point.position.x)
+            minY = min(minY, point.position.y)
+            maxX = max(maxX, point.position.x)
+            maxY = max(maxY, point.position.y)
+        }
+
+        let inset = Double(renderWidth)
+        return CGRect(
+            x: minX - inset,
+            y: minY - inset,
+            width: max(maxX - minX + inset * 2, 1),
+            height: max(maxY - minY + inset * 2, 1)
+        )
+    }
+}
+
+private func localPoint(_ point: CanvasPoint, in bounds: CGRect) -> CGPoint {
+    CGPoint(x: point.x - bounds.minX, y: point.y - bounds.minY)
 }
 
 private func distance(_ a: CGPoint, to b: CGPoint) -> CGFloat {
