@@ -6,10 +6,12 @@ struct CanvasPrototypeView: UIViewRepresentable {
     /// Passed as a plain value (not read off `model` in here) so SwiftUI
     /// reliably re-runs `updateUIView` when the HUD toggle flips.
     let fingerDrawing: Bool
+    let toolStyle: PrototypeToolStyle
 
     func makeUIView(context: Context) -> CanvasPrototypeUIView {
         let view = CanvasPrototypeUIView()
         view.fingerDrawingEnabled = fingerDrawing
+        view.toolStyle = toolStyle
         view.onChange = { [weak model] camera, strokeCount in
             model?.apply(camera: camera, strokeCount: strokeCount)
         }
@@ -19,5 +21,6 @@ struct CanvasPrototypeView: UIViewRepresentable {
 
     func updateUIView(_ view: CanvasPrototypeUIView, context: Context) {
         view.fingerDrawingEnabled = fingerDrawing
+        view.toolStyle = toolStyle
     }
 }

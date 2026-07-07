@@ -24,13 +24,18 @@ final class CanvasPrototypeUIView: UIView {
     private var strokes: [PrototypeStroke] = []
     private var activeStroke: PrototypeStroke?
     private var activeTouch: UITouch?
+    private var activeInput: ActiveInput?
+    private var activeToolStyle: PrototypeToolStyle?
     private var predictedPoints: [PrototypePoint] = []
+    private var eraserPreviewPoint: CanvasPoint?
 
     /// Lets a finger (or the simulator's mouse) draw. While enabled,
     /// panning needs two fingers so drawing and panning don't fight.
     var fingerDrawingEnabled = false {
         didSet { panRecognizer.minimumNumberOfTouches = fingerDrawingEnabled ? 2 : 1 }
     }
+
+    var toolStyle: PrototypeToolStyle = .default
 
     var onChange: ((Camera, Int) -> Void)?
 
@@ -40,6 +45,11 @@ final class CanvasPrototypeUIView: UIView {
     private let panRecognizer = UIPanGestureRecognizer()
     private let pinchRecognizer = UIPinchGestureRecognizer()
     private let rotationRecognizer = UIRotationGestureRecognizer()
+
+    private enum ActiveInput {
+        case drawing
+        case erasing
+    }
 
     // MARK: Setup
 
@@ -92,7 +102,10 @@ final class CanvasPrototypeUIView: UIView {
         strokes.removeAll()
         activeStroke = nil
         activeTouch = nil
+        activeInput = nil
+        activeToolStyle = nil
         predictedPoints = []
+        eraserPreviewPoint = nil
         setNeedsDisplay()
         noteChanged()
     }
@@ -136,15 +149,35 @@ final class CanvasPrototypeUIView: UIView {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard activeTouch == nil, let touch = touches.first(where: isDrawingTouch) else { return }
         activeTouch = touch
-        activeStroke = PrototypeStroke(points: [sample(touch)], baseWidth: 3)
+        let style = toolStyle
+        activeToolStyle = style
+
+        let firstSample = sample(touch)
+        if style.kind == .eraser {
+            activeInput = .erasing
+            eraserPreviewPoint = firstSample.position
+            erase(at: [firstSample], radius: style.width / 2)
+        } else {
+            activeInput = .drawing
+            activeStroke = PrototypeStroke(points: [firstSample], style: style)
+        }
         setNeedsDisplay()
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = activeTouch, touches.contains(touch), activeStroke != nil else { return }
+        guard let touch = activeTouch, touches.contains(touch), let activeInput else { return }
         let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
-        activeStroke?.points.append(contentsOf: coalesced.map(sample))
-        predictedPoints = (event?.predictedTouches(for: touch) ?? []).map(sample)
+        let samples = coalesced.map(sample)
+
+        switch activeInput {
+        case .drawing:
+            activeStroke?.points.append(contentsOf: samples)
+            predictedPoints = (event?.predictedTouches(for: touch) ?? []).map(sample)
+        case .erasing:
+            predictedPoints = []
+            eraserPreviewPoint = samples.last?.position
+            erase(at: samples, radius: (activeToolStyle ?? toolStyle).width / 2)
+        }
         setNeedsDisplay()
     }
 
@@ -160,12 +193,15 @@ final class CanvasPrototypeUIView: UIView {
 
     private func finishStroke(_ touches: Set<UITouch>) {
         guard let touch = activeTouch, touches.contains(touch) else { return }
-        if let stroke = activeStroke, !stroke.points.isEmpty {
+        if activeInput == .drawing, let stroke = activeStroke, !stroke.points.isEmpty {
             strokes.append(stroke)
         }
         activeStroke = nil
         activeTouch = nil
+        activeInput = nil
+        activeToolStyle = nil
         predictedPoints = []
+        eraserPreviewPoint = nil
         setNeedsDisplay()
         noteChanged()
     }
@@ -193,14 +229,19 @@ final class CanvasPrototypeUIView: UIView {
             live.points.append(contentsOf: predictedPoints)
             draw(live, in: ctx)
         }
+        if let eraserPreviewPoint {
+            drawEraserPreview(at: eraserPreviewPoint, in: ctx)
+        }
         ctx.restoreGState()
     }
 
-    private let inkColor = UIColor(white: 0.13, alpha: 1)
-
     private func draw(_ stroke: PrototypeStroke, in ctx: CGContext) {
-        ctx.setStrokeColor(inkColor.cgColor)
-        ctx.setFillColor(inkColor.cgColor)
+        guard stroke.style.kind != .eraser else { return }
+        let color = stroke.style.color.uiColor(alpha: stroke.style.opacity)
+        ctx.saveGState()
+        ctx.setBlendMode(stroke.style.blendMode)
+        ctx.setStrokeColor(color.cgColor)
+        ctx.setFillColor(color.cgColor)
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
 
@@ -210,6 +251,7 @@ final class CanvasPrototypeUIView: UIView {
                 let r = stroke.width(for: p.force) / 2
                 ctx.fillEllipse(in: CGRect(x: p.position.x - r, y: p.position.y - r, width: r * 2, height: r * 2))
             }
+            ctx.restoreGState()
             return
         }
         // Per-segment widths so pressure reads; round caps hide the joins.
@@ -218,6 +260,38 @@ final class CanvasPrototypeUIView: UIView {
             ctx.move(to: points[i - 1].position.cgPoint)
             ctx.addLine(to: points[i].position.cgPoint)
             ctx.strokePath()
+        }
+        ctx.restoreGState()
+    }
+
+    private func drawEraserPreview(at point: CanvasPoint, in ctx: CGContext) {
+        let radius = (activeToolStyle ?? toolStyle).width / 2
+        ctx.saveGState()
+        ctx.setBlendMode(.normal)
+        ctx.setLineWidth(1 / camera.scale)
+        ctx.setStrokeColor(UIColor.label.withAlphaComponent(0.45).cgColor)
+        ctx.setFillColor(UIColor.label.withAlphaComponent(0.06).cgColor)
+        let rect = CGRect(
+            x: point.x - radius,
+            y: point.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        )
+        ctx.fillEllipse(in: rect)
+        ctx.strokeEllipse(in: rect)
+        ctx.restoreGState()
+    }
+
+    private func erase(at samples: [PrototypePoint], radius: CGFloat) {
+        guard !samples.isEmpty else { return }
+        let previousCount = strokes.count
+        strokes.removeAll { stroke in
+            samples.contains { sample in
+                stroke.contains(sample.position, eraserRadius: radius)
+            }
+        }
+        if strokes.count != previousCount {
+            noteChanged()
         }
     }
 

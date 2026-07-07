@@ -10,10 +10,17 @@ struct RootView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            CanvasPrototypeView(model: model, fingerDrawing: model.fingerDrawing)
+            CanvasPrototypeView(
+                model: model,
+                fingerDrawing: model.fingerDrawing,
+                toolStyle: model.currentToolStyle
+            )
                 .ignoresSafeArea()
             PrototypeHUD(model: model)
                 .padding(12)
+        }
+        .safeAreaInset(edge: .bottom) {
+            PrototypeToolToolbar(model: model)
         }
         .enableInjection()
     }
@@ -28,20 +35,17 @@ private struct PrototypeHUD: View {
                 .font(.caption.weight(.semibold))
             Text("Zoom \(Int((model.scale * 100).rounded()))%  ·  Rotation \(Int(model.rotationDegrees.rounded()))°  ·  Strokes \(model.strokeCount)")
                 .font(.caption.monospacedDigit())
-            Text("Pencil draws · 1–2 fingers pan · pinch zooms · twist rotates · 🔥")
+            Text("Pencil draws · 1–2 fingers pan · pinch zooms · twist rotates")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             HStack(spacing: 10) {
-                Button("Reset view") { model.resetCamera() }
-                Button("Clear ink", role: .destructive) { model.clearInk() }
-                Toggle("Finger draws", isOn: $model.fingerDrawing)
-                    .toggleStyle(.button)
+                AppButton(label: "Reset view") { model.resetCamera() }
+                AppButton(label: "Clear ink") { model.clearInk() }
+                AppToggle(isOn: $model.fingerDrawing, label: "Finger draws")
             }
             .font(.caption)
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .padding(12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
 }
