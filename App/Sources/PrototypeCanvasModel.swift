@@ -35,6 +35,10 @@ final class PrototypeCanvasModel {
 
     func resetCamera() { canvasView?.resetCamera() }
     func clearInk() { canvasView?.clearInk() }
+    func deleteSelection() { canvasView?.deleteSelectedStrokes() }
+    func translateSelection(dx: CGFloat, dy: CGFloat) { canvasView?.translateSelectionByScreen(dx: dx, dy: dy) }
+    func scaleSelection(by factor: CGFloat) { canvasView?.scaleSelection(by: factor) }
+    func rotateSelection(by degrees: CGFloat) { canvasView?.rotateSelection(by: degrees * .pi / 180) }
 
     var currentToolStyle: PrototypeToolStyle {
         PrototypeToolStyle.resolved(
@@ -50,7 +54,7 @@ final class PrototypeCanvasModel {
 
     func selectInkColor(_ color: PrototypeInkColor) {
         selectedInkColor = color
-        if selectedTool == .highlighter || selectedTool == .eraser {
+        if selectedTool == .highlighter || selectedTool == .eraser || selectedTool == .selection {
             selectedTool = .pen
         }
     }

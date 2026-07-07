@@ -30,9 +30,13 @@ final class CanvasPrototypeUIView: UIView {
     private var predictedPoints: [PrototypePoint] = []
     private var eraserPreviewPoint: CanvasPoint?
     private var activeEraserRemovedStrokes: [IndexedStroke] = []
+    private var activeSelectionPoints: [CanvasPoint] = []
+    private var selectionLassoPoints: [CanvasPoint] = []
+    private var selectedStrokeIDs: Set<UUID> = []
     private var strokeLayers: [UUID: CAShapeLayer] = [:]
     private var activeStrokeLayer: CAShapeLayer?
     private var eraserPreviewLayer: CAShapeLayer?
+    private var selectionLayer: CAShapeLayer?
     private var undoStack: [CanvasAction] = []
     private var redoStack: [CanvasAction] = []
 
@@ -58,20 +62,51 @@ final class CanvasPrototypeUIView: UIView {
     private let rotationRecognizer = UIRotationGestureRecognizer()
     private let undoRecognizer = UITapGestureRecognizer()
     private let redoRecognizer = UITapGestureRecognizer()
+    private let circleSelectRecognizer = UILongPressGestureRecognizer()
 
     private enum ActiveInput {
         case drawing
         case erasing
+        case selecting
     }
 
     private enum CanvasAction {
         case add(PrototypeStroke)
         case remove([IndexedStroke])
+        case transform(SelectionTransformAction)
     }
 
     private struct IndexedStroke {
         let stroke: PrototypeStroke
         let index: Int
+    }
+
+    private struct SelectionTransformAction {
+        let before: [PrototypeStroke]
+        let after: [PrototypeStroke]
+        let lassoBefore: [CanvasPoint]
+        let lassoAfter: [CanvasPoint]
+    }
+
+    private struct SelectionTransform {
+        let center: CanvasPoint
+        let translation: CGVector
+        let scale: CGFloat
+        let rotation: CGFloat
+
+        func apply(to point: CanvasPoint) -> CanvasPoint {
+            let dx = point.x - center.x
+            let dy = point.y - center.y
+            let scaledX = dx * Double(scale)
+            let scaledY = dy * Double(scale)
+            let c = Double(cos(rotation))
+            let s = Double(sin(rotation))
+
+            return CanvasPoint(
+                x: center.x + Double(translation.dx) + c * scaledX - s * scaledY,
+                y: center.y + Double(translation.dy) + s * scaledX + c * scaledY
+            )
+        }
     }
 
     // MARK: Setup
@@ -101,6 +136,10 @@ final class CanvasPrototypeUIView: UIView {
         redoRecognizer.numberOfTouchesRequired = 3
         redoRecognizer.numberOfTapsRequired = 2
         redoRecognizer.cancelsTouchesInView = false
+        circleSelectRecognizer.addTarget(self, action: #selector(handleCircleSelectPress(_:)))
+        circleSelectRecognizer.minimumPressDuration = 0.45
+        circleSelectRecognizer.allowableMovement = 18
+        circleSelectRecognizer.cancelsTouchesInView = false
 
         // Navigation is finger-only; pencil touches fall through to the
         // touches* overrides below and always draw.
@@ -110,6 +149,12 @@ final class CanvasPrototypeUIView: UIView {
             recognizer.delegate = self
             addGestureRecognizer(recognizer)
         }
+        circleSelectRecognizer.allowedTouchTypes = [
+            NSNumber(value: UITouch.TouchType.direct.rawValue),
+            NSNumber(value: UITouch.TouchType.pencil.rawValue),
+        ]
+        circleSelectRecognizer.delegate = self
+        addGestureRecognizer(circleSelectRecognizer)
         undoRecognizer.require(toFail: redoRecognizer)
     }
 
@@ -147,6 +192,7 @@ final class CanvasPrototypeUIView: UIView {
             layer.removeFromSuperlayer()
         }
         strokeLayers.removeAll()
+        clearSelection()
         undoStack.removeAll()
         redoStack.removeAll()
         activeStrokeLayer?.removeFromSuperlayer()
@@ -159,6 +205,7 @@ final class CanvasPrototypeUIView: UIView {
         predictedPoints = []
         eraserPreviewPoint = nil
         activeEraserRemovedStrokes = []
+        activeSelectionPoints = []
         setNeedsDisplay()
         noteChanged(force: true)
     }
@@ -182,6 +229,61 @@ final class CanvasPrototypeUIView: UIView {
 
     func startBlankNote() {
         replaceCanvas(strokes: [], camera: defaultCamera)
+    }
+
+    func deleteSelectedStrokes() {
+        guard !selectedStrokeIDs.isEmpty else { return }
+        let removed = indexedStrokes(withIDs: selectedStrokeIDs)
+        guard !removed.isEmpty else {
+            clearSelection()
+            return
+        }
+
+        removeIndexedStrokes(removed)
+        record(.remove(removed))
+        clearSelection()
+        noteChanged(force: true)
+    }
+
+    func translateSelectionByScreen(dx: CGFloat, dy: CGFloat) {
+        guard let center = selectedStrokeCenter else { return }
+        let screenCenter = camera.toScreen(center)
+        let movedCenter = camera.toCanvas(ScreenPoint(
+            x: screenCenter.x + Double(dx),
+            y: screenCenter.y + Double(dy)
+        ))
+        let transform = SelectionTransform(
+            center: center,
+            translation: CGVector(
+                dx: CGFloat(movedCenter.x - center.x),
+                dy: CGFloat(movedCenter.y - center.y)
+            ),
+            scale: 1,
+            rotation: 0
+        )
+        transformSelection(transform, scalesStrokeWidth: false)
+    }
+
+    func scaleSelection(by factor: CGFloat) {
+        guard factor > 0, let center = selectedStrokeCenter else { return }
+        let transform = SelectionTransform(
+            center: center,
+            translation: .zero,
+            scale: factor,
+            rotation: 0
+        )
+        transformSelection(transform, scalesStrokeWidth: true)
+    }
+
+    func rotateSelection(by radians: CGFloat) {
+        guard let center = selectedStrokeCenter else { return }
+        let transform = SelectionTransform(
+            center: center,
+            translation: .zero,
+            scale: 1,
+            rotation: radians
+        )
+        transformSelection(transform, scalesStrokeWidth: false)
     }
 
     private func noteChanged(force: Bool = false) {
@@ -227,6 +329,26 @@ final class CanvasPrototypeUIView: UIView {
         redo()
     }
 
+    @objc private func handleCircleSelectPress(_ recognizer: UILongPressGestureRecognizer) {
+        guard recognizer.state == .began else { return }
+        cancelActiveInputForHistoryGesture()
+
+        let location = ScreenPoint(cgPoint: recognizer.location(in: self))
+        let canvasPoint = camera.toCanvas(location)
+        guard let circleStroke = circleSelectionCandidate(at: canvasPoint) else { return }
+
+        let lassoPoints = circleStroke.stroke.points.map(\.position)
+        var hitIDs = strokeIDsHit(by: lassoPoints, includeInterior: true)
+        hitIDs.remove(circleStroke.stroke.id)
+        guard !hitIDs.isEmpty else { return }
+
+        let removedCircle = IndexedStroke(stroke: circleStroke.stroke, index: circleStroke.index)
+        removeIndexedStrokes([removedCircle])
+        record(.remove([removedCircle]))
+        selectStrokeIDs(hitIDs, lassoPoints: lassoPoints)
+        noteChanged(force: true)
+    }
+
     // MARK: Pencil input → canvas-space strokes
 
     private func isDrawingTouch(_ touch: UITouch) -> Bool {
@@ -240,13 +362,20 @@ final class CanvasPrototypeUIView: UIView {
         activeToolStyle = style
 
         let firstSample = sample(touch)
-        if style.kind == .eraser {
+        if style.kind == .selection {
+            activeInput = .selecting
+            clearSelection()
+            activeSelectionPoints = [firstSample.position]
+            updateSelectionLayer(points: activeSelectionPoints, isFinal: false)
+        } else if style.kind == .eraser {
+            clearSelection()
             activeInput = .erasing
             activeEraserRemovedStrokes = []
             eraserPreviewPoint = firstSample.position
             updateEraserPreview(at: firstSample.position, radius: style.width / 2)
             erase(at: [firstSample], radius: style.width / 2)
         } else {
+            clearSelection()
             activeInput = .drawing
             activeStroke = PrototypeStroke(points: [firstSample], style: style)
             if let activeStroke {
@@ -276,6 +405,10 @@ final class CanvasPrototypeUIView: UIView {
                 updateEraserPreview(at: point, radius: (activeToolStyle ?? toolStyle).width / 2)
             }
             erase(at: samples, radius: (activeToolStyle ?? toolStyle).width / 2)
+        case .selecting:
+            appendSelectionPoints(samples.map(\.position))
+            predictedPoints = []
+            updateSelectionLayer(points: activeSelectionPoints, isFinal: false)
         }
     }
 
@@ -291,19 +424,19 @@ final class CanvasPrototypeUIView: UIView {
 
     private func finishStroke(_ touches: Set<UITouch>) {
         guard let touch = activeTouch, touches.contains(touch) else { return }
-        if activeInput == .drawing, let stroke = activeStroke, !stroke.points.isEmpty {
-            predictedPoints = []
-            updateStrokeLayer(activeStrokeLayer, for: stroke)
-            strokes.append(stroke)
-            if let activeStrokeLayer {
-                strokeLayers[stroke.id] = activeStrokeLayer
+        switch activeInput {
+        case .drawing:
+            finishDrawingStroke()
+        case .erasing:
+            if !activeEraserRemovedStrokes.isEmpty {
+                record(.remove(activeEraserRemovedStrokes))
             }
-            record(.add(stroke))
-        } else if activeInput == .erasing, !activeEraserRemovedStrokes.isEmpty {
-            record(.remove(activeEraserRemovedStrokes))
-        } else {
+        case .selecting:
+            finishSelection()
+        case nil:
             activeStrokeLayer?.removeFromSuperlayer()
         }
+
         activeStroke = nil
         activeTouch = nil
         activeInput = nil
@@ -312,8 +445,46 @@ final class CanvasPrototypeUIView: UIView {
         predictedPoints = []
         eraserPreviewPoint = nil
         activeEraserRemovedStrokes = []
+        activeSelectionPoints = []
         removeEraserPreview()
         noteChanged(force: true)
+    }
+
+    private func finishDrawingStroke() {
+        guard let stroke = activeStroke, !stroke.points.isEmpty else {
+            activeStrokeLayer?.removeFromSuperlayer()
+            return
+        }
+
+        if handleScribbleDeleteIfNeeded(stroke) {
+            activeStrokeLayer?.removeFromSuperlayer()
+            return
+        }
+
+        commitStroke(stroke, layer: activeStrokeLayer)
+    }
+
+    private func commitStroke(_ stroke: PrototypeStroke, layer: CAShapeLayer?) {
+        guard !stroke.points.isEmpty else {
+            layer?.removeFromSuperlayer()
+            return
+        }
+
+        var stroke = stroke
+        if stroke.style.kind == .selection {
+            stroke.style = PrototypeToolStyle.default
+        }
+        if layer == activeStrokeLayer {
+            predictedPoints = []
+        }
+        if let layer {
+            updateStrokeLayer(layer, for: stroke)
+            strokes.append(stroke)
+            strokeLayers[stroke.id] = layer
+        } else {
+            addStrokeWithoutHistory(stroke, at: strokes.count)
+        }
+        record(.add(stroke))
     }
 
     /// SPEC §5: every sample is converted to canvas space at capture time,
@@ -362,6 +533,7 @@ final class CanvasPrototypeUIView: UIView {
             layer.removeFromSuperlayer()
         }
         strokeLayers.removeAll()
+        clearSelection()
         undoStack.removeAll()
         redoStack.removeAll()
         activeStrokeLayer?.removeFromSuperlayer()
@@ -455,6 +627,222 @@ final class CanvasPrototypeUIView: UIView {
         eraserPreviewLayer = nil
     }
 
+    private func appendSelectionPoints(_ points: [CanvasPoint]) {
+        for point in points {
+            guard let last = activeSelectionPoints.last else {
+                activeSelectionPoints.append(point)
+                continue
+            }
+
+            if distance(last.cgPoint, to: point.cgPoint) >= max(2 / camera.scale, 0.75) {
+                activeSelectionPoints.append(point)
+            }
+        }
+    }
+
+    private func finishSelection() {
+        let points = activeSelectionPoints
+        guard points.count > 1 else {
+            clearSelection()
+            return
+        }
+
+        let ids = strokeIDsHit(by: points, includeInterior: true)
+        selectStrokeIDs(ids, lassoPoints: points)
+    }
+
+    private func selectStrokeIDs(_ ids: Set<UUID>, lassoPoints: [CanvasPoint]) {
+        selectedStrokeIDs = ids
+        selectionLassoPoints = lassoPoints
+        updateSelectionLayer(points: lassoPoints, isFinal: true)
+        applySelectionHighlight()
+    }
+
+    private func clearSelection() {
+        selectedStrokeIDs.removeAll()
+        selectionLassoPoints.removeAll()
+        activeSelectionPoints.removeAll()
+        selectionLayer?.removeFromSuperlayer()
+        selectionLayer = nil
+        applySelectionHighlight()
+    }
+
+    private func updateSelectionLayer(points: [CanvasPoint], isFinal: Bool) {
+        guard points.count > 1 else { return }
+        let layer = selectionLayer ?? makeSelectionLayer()
+        selectionLayer = layer
+        if layer.superlayer == nil {
+            withoutLayerActions {
+                canvasLayer.addSublayer(layer)
+            }
+        }
+
+        let bounds = boundingRect(for: points).insetBy(dx: -12, dy: -12)
+        let path = CGMutablePath()
+        path.move(to: localPoint(points[0], in: bounds))
+        for point in points.dropFirst() {
+            path.addLine(to: localPoint(point, in: bounds))
+        }
+        if isFinal, isClosedShape(points) {
+            path.closeSubpath()
+        }
+
+        withoutLayerActions {
+            layer.frame = bounds
+            layer.path = path
+            layer.fillColor = isFinal && isClosedShape(points)
+                ? UIColor.systemBlue.withAlphaComponent(0.08).cgColor
+                : UIColor.clear.cgColor
+            layer.lineWidth = max(2 / camera.scale, 0.75)
+        }
+    }
+
+    private func makeSelectionLayer() -> CAShapeLayer {
+        let layer = CAShapeLayer()
+        layer.contentsScale = traitCollection.displayScale
+        layer.strokeColor = UIColor.systemBlue.withAlphaComponent(0.9).cgColor
+        layer.fillColor = UIColor.clear.cgColor
+        layer.lineCap = .round
+        layer.lineJoin = .round
+        layer.lineDashPattern = [8, 5]
+        return layer
+    }
+
+    private func applySelectionHighlight() {
+        for (id, layer) in strokeLayers {
+            let isSelected = selectedStrokeIDs.contains(id)
+            withoutLayerActions {
+                layer.shadowColor = isSelected ? UIColor.systemBlue.cgColor : nil
+                layer.shadowOpacity = isSelected ? 0.95 : 0
+                layer.shadowRadius = isSelected ? 4 : 0
+                layer.shadowOffset = .zero
+            }
+        }
+    }
+
+    private func strokeIDsHit(
+        by lassoPoints: [CanvasPoint],
+        includeInterior: Bool,
+        tolerance overrideTolerance: CGFloat? = nil
+    ) -> Set<UUID> {
+        guard lassoPoints.count > 1 else { return [] }
+        let tolerance = overrideTolerance ?? selectionHitRadius
+        let lassoBounds = boundingRect(for: lassoPoints).insetBy(dx: -Double(tolerance), dy: -Double(tolerance))
+        let closed = includeInterior && isClosedShape(lassoPoints)
+
+        return Set(strokes.compactMap { stroke in
+            guard stroke.renderBounds.intersects(lassoBounds) else { return nil }
+            if lassoTouches(stroke, points: lassoPoints, tolerance: tolerance) {
+                return stroke.id
+            }
+            if closed, stroke.points.contains(where: { pointInPolygon($0.position, polygon: lassoPoints) }) {
+                return stroke.id
+            }
+            return nil
+        })
+    }
+
+    private func lassoTouches(_ stroke: PrototypeStroke, points: [CanvasPoint], tolerance: CGFloat) -> Bool {
+        points.contains { point in
+            stroke.contains(point, eraserRadius: tolerance)
+        }
+    }
+
+    private var selectionHitRadius: CGFloat {
+        max(8 / camera.scale, 3)
+    }
+
+    private var selectedStrokes: [PrototypeStroke] {
+        strokes.filter { selectedStrokeIDs.contains($0.id) }
+    }
+
+    private var selectedStrokeCenter: CanvasPoint? {
+        let points = selectedStrokes.flatMap { stroke in
+            stroke.points.map(\.position)
+        }
+        guard !points.isEmpty else {
+            if !selectedStrokeIDs.isEmpty {
+                clearSelection()
+            }
+            return nil
+        }
+
+        let bounds = boundingRect(for: points)
+        return CanvasPoint(x: bounds.midX, y: bounds.midY)
+    }
+
+    private func transformSelection(_ transform: SelectionTransform, scalesStrokeWidth: Bool) {
+        cancelActiveInputForHistoryGesture()
+
+        let before = selectedStrokes
+        guard !before.isEmpty else {
+            clearSelection()
+            return
+        }
+
+        let lassoBefore = selectionLassoPoints
+        let after = before.map { stroke in
+            transformed(stroke, by: transform, scalesStrokeWidth: scalesStrokeWidth)
+        }
+        let lassoAfter = lassoBefore.map(transform.apply)
+
+        applyStrokeVersions(after, lassoPoints: lassoAfter)
+        record(.transform(SelectionTransformAction(
+            before: before,
+            after: after,
+            lassoBefore: lassoBefore,
+            lassoAfter: lassoAfter
+        )))
+        noteChanged(force: true)
+    }
+
+    private func transformed(
+        _ stroke: PrototypeStroke,
+        by transform: SelectionTransform,
+        scalesStrokeWidth: Bool
+    ) -> PrototypeStroke {
+        var stroke = stroke
+        stroke.points = stroke.points.map { point in
+            PrototypePoint(position: transform.apply(to: point.position), force: point.force)
+        }
+        if scalesStrokeWidth {
+            stroke.style = scaledStyle(stroke.style, by: transform.scale)
+        }
+        return stroke
+    }
+
+    private func scaledStyle(_ style: PrototypeToolStyle, by factor: CGFloat) -> PrototypeToolStyle {
+        PrototypeToolStyle(
+            kind: style.kind,
+            color: style.color,
+            width: min(max(style.width * factor, 0.5), 160),
+            opacity: style.opacity,
+            pressureSensitive: style.pressureSensitive,
+            blendMode: style.blendMode
+        )
+    }
+
+    private func applyStrokeVersions(_ versions: [PrototypeStroke], lassoPoints: [CanvasPoint]) {
+        guard !versions.isEmpty else { return }
+        let versionsByID = Dictionary(uniqueKeysWithValues: versions.map { ($0.id, $0) })
+        for index in strokes.indices {
+            guard let updatedStroke = versionsByID[strokes[index].id] else { continue }
+            strokes[index] = updatedStroke
+            updateStrokeLayer(strokeLayers[updatedStroke.id], for: updatedStroke)
+        }
+
+        if !selectedStrokeIDs.isDisjoint(with: Set(versionsByID.keys)) {
+            selectionLassoPoints = lassoPoints
+            if lassoPoints.count > 1 {
+                updateSelectionLayer(points: lassoPoints, isFinal: true)
+            } else {
+                selectionLayer?.removeFromSuperlayer()
+                selectionLayer = nil
+            }
+        }
+        applySelectionHighlight()
+    }
+
     private func withoutLayerActions(_ updates: () -> Void) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -483,12 +871,77 @@ final class CanvasPrototypeUIView: UIView {
         noteChanged(force: true)
     }
 
+    private func handleScribbleDeleteIfNeeded(_ stroke: PrototypeStroke) -> Bool {
+        guard isScribbleDeleteGesture(stroke) else { return false }
+        let hitIDs = strokeIDsHit(
+            by: stroke.points.map(\.position),
+            includeInterior: false,
+            tolerance: max(stroke.renderWidth, selectionHitRadius)
+        )
+        let removed = indexedStrokes(withIDs: hitIDs)
+        guard !removed.isEmpty else { return false }
+
+        removeIndexedStrokes(removed)
+        record(.remove(removed))
+        clearSelection()
+        noteChanged(force: true)
+        return true
+    }
+
+    private func isScribbleDeleteGesture(_ stroke: PrototypeStroke) -> Bool {
+        guard [.pen, .pencil, .marker].contains(stroke.style.kind),
+              stroke.points.count >= 10
+        else { return false }
+
+        let points = stroke.points.map(\.position)
+        let box = boundingRect(for: points)
+        let diagonal = max(hypot(box.width, box.height), 1)
+        guard diagonal >= 18 else { return false }
+
+        let length = pathLength(points)
+        let reversals = directionReversalCount(points)
+        return length / diagonal >= 3.2 && reversals >= 3
+    }
+
+    private func circleSelectionCandidate(at point: CanvasPoint) -> IndexedStroke? {
+        let hitRadius = max(14 / camera.scale, 5)
+        for (index, stroke) in strokes.enumerated().reversed() {
+            guard isCircleSelectionCandidate(stroke),
+                  stroke.contains(point, eraserRadius: hitRadius)
+            else { continue }
+            return IndexedStroke(stroke: stroke, index: index)
+        }
+        return nil
+    }
+
+    private func isCircleSelectionCandidate(_ stroke: PrototypeStroke) -> Bool {
+        guard [.pen, .pencil, .marker].contains(stroke.style.kind),
+              stroke.points.count >= 12
+        else { return false }
+
+        let points = stroke.points.map(\.position)
+        guard isClosedShape(points) else { return false }
+
+        let box = boundingRect(for: points)
+        let width = max(box.width, 1)
+        let height = max(box.height, 1)
+        let diagonal = hypot(width, height)
+        let aspect = width / height
+        guard diagonal >= 35, (0.45...2.2).contains(aspect) else { return false }
+
+        let fillRatio = abs(polygonArea(points)) / max(width * height, 1)
+        let lengthRatio = pathLength(points) / max(diagonal, 1)
+        return (0.22...0.92).contains(fillRatio) && (1.8...7.5).contains(lengthRatio)
+    }
+
     private func apply(_ action: CanvasAction) {
         switch action {
         case .add(let stroke):
             addStroke(stroke, at: strokes.count)
         case .remove(let indexedStrokes):
             removeStrokes(withIDs: indexedStrokes.map(\.stroke.id))
+        case .transform(let transformAction):
+            applyStrokeVersions(transformAction.after, lassoPoints: transformAction.lassoAfter)
         }
     }
 
@@ -498,6 +951,8 @@ final class CanvasPrototypeUIView: UIView {
             removeStrokes(withIDs: [stroke.id])
         case .remove(let indexedStrokes):
             restore(indexedStrokes)
+        case .transform(let transformAction):
+            applyStrokeVersions(transformAction.before, lassoPoints: transformAction.lassoBefore)
         }
     }
 
@@ -519,14 +974,28 @@ final class CanvasPrototypeUIView: UIView {
 
     private func removeStrokes(withIDs ids: [UUID]) {
         guard !ids.isEmpty else { return }
-        let ids = Set(ids)
+        removeIndexedStrokes(indexedStrokes(withIDs: Set(ids)))
+    }
+
+    private func indexedStrokes(withIDs ids: Set<UUID>) -> [IndexedStroke] {
+        strokes.enumerated().compactMap { index, stroke in
+            ids.contains(stroke.id) ? IndexedStroke(stroke: stroke, index: index) : nil
+        }
+    }
+
+    private func removeIndexedStrokes(_ indexedStrokes: [IndexedStroke]) {
+        guard !indexedStrokes.isEmpty else { return }
+        let ids = Set(indexedStrokes.map(\.stroke.id))
         strokes.removeAll { ids.contains($0.id) }
+        selectedStrokeIDs.subtract(ids)
+
         for id in ids {
             withoutLayerActions {
                 strokeLayers[id]?.removeFromSuperlayer()
             }
             strokeLayers.removeValue(forKey: id)
         }
+        applySelectionHighlight()
     }
 
     private func insertLayer(_ layer: CALayer, forStrokeAt index: Int) {
@@ -566,30 +1035,25 @@ final class CanvasPrototypeUIView: UIView {
         predictedPoints = []
         eraserPreviewPoint = nil
         activeEraserRemovedStrokes = []
+        activeSelectionPoints = []
+        if selectedStrokeIDs.isEmpty {
+            selectionLayer?.removeFromSuperlayer()
+            selectionLayer = nil
+        }
         removeEraserPreview()
     }
 
     private func erase(at samples: [PrototypePoint], radius: CGFloat) {
         guard !samples.isEmpty else { return }
         let previousCount = strokes.count
-        var removed: [IndexedStroke] = []
-        strokes = strokes.enumerated().compactMap { index, stroke in
+        let removed = strokes.enumerated().compactMap { index, stroke -> IndexedStroke? in
             let shouldRemove = samples.contains { sample in
                 stroke.contains(sample.position, eraserRadius: radius)
             }
-            if shouldRemove {
-                removed.append(IndexedStroke(stroke: stroke, index: index))
-                return nil
-            }
-            return stroke
+            return shouldRemove ? IndexedStroke(stroke: stroke, index: index) : nil
         }
+        removeIndexedStrokes(removed)
         activeEraserRemovedStrokes.append(contentsOf: removed)
-        for indexedStroke in removed {
-            withoutLayerActions {
-                strokeLayers[indexedStroke.stroke.id]?.removeFromSuperlayer()
-            }
-            strokeLayers.removeValue(forKey: indexedStroke.stroke.id)
-        }
         if strokes.count != previousCount {
             noteChanged(force: true)
         }
@@ -657,4 +1121,105 @@ extension CanvasPrototypeUIView: UIGestureRecognizerDelegate {
         // navigation gesture.
         true
     }
+}
+
+private func localPoint(_ point: CanvasPoint, in bounds: CGRect) -> CGPoint {
+    CGPoint(x: point.x - bounds.minX, y: point.y - bounds.minY)
+}
+
+private func boundingRect(for points: [CanvasPoint]) -> CGRect {
+    guard let first = points.first else { return .null }
+    var minX = first.x
+    var minY = first.y
+    var maxX = first.x
+    var maxY = first.y
+
+    for point in points.dropFirst() {
+        minX = min(minX, point.x)
+        minY = min(minY, point.y)
+        maxX = max(maxX, point.x)
+        maxY = max(maxY, point.y)
+    }
+
+    return CGRect(
+        x: minX,
+        y: minY,
+        width: max(maxX - minX, 1),
+        height: max(maxY - minY, 1)
+    )
+}
+
+private func distance(_ a: CGPoint, to b: CGPoint) -> CGFloat {
+    hypot(a.x - b.x, a.y - b.y)
+}
+
+private func pathLength(_ points: [CanvasPoint]) -> CGFloat {
+    guard points.count > 1 else { return 0 }
+    var length: CGFloat = 0
+    for index in 1..<points.count {
+        length += distance(points[index - 1].cgPoint, to: points[index].cgPoint)
+    }
+    return length
+}
+
+private func directionReversalCount(_ points: [CanvasPoint]) -> Int {
+    guard points.count > 2 else { return 0 }
+    let box = boundingRect(for: points)
+    let useX = box.width >= box.height
+    var lastSign = 0
+    var reversals = 0
+
+    for index in 1..<points.count {
+        let delta = useX
+            ? points[index].x - points[index - 1].x
+            : points[index].y - points[index - 1].y
+        guard abs(delta) >= 2 else { continue }
+
+        let sign = delta > 0 ? 1 : -1
+        if lastSign != 0, sign != lastSign {
+            reversals += 1
+        }
+        lastSign = sign
+    }
+
+    return reversals
+}
+
+private func isClosedShape(_ points: [CanvasPoint]) -> Bool {
+    guard let first = points.first, let last = points.last, points.count >= 8 else { return false }
+    let box = boundingRect(for: points)
+    let diagonal = hypot(box.width, box.height)
+    let threshold = max(8, min(45, diagonal * 0.22))
+    return distance(first.cgPoint, to: last.cgPoint) <= threshold
+}
+
+private func polygonArea(_ points: [CanvasPoint]) -> CGFloat {
+    guard points.count > 2 else { return 0 }
+    var area: Double = 0
+    for index in points.indices {
+        let next = points.index(after: index) == points.endIndex ? points.startIndex : points.index(after: index)
+        area += points[index].x * points[next].y - points[next].x * points[index].y
+    }
+    return CGFloat(area / 2)
+}
+
+private func pointInPolygon(_ point: CanvasPoint, polygon: [CanvasPoint]) -> Bool {
+    guard polygon.count > 2 else { return false }
+    var isInside = false
+    var j = polygon.count - 1
+
+    for i in polygon.indices {
+        let pi = polygon[i]
+        let pj = polygon[j]
+        let crosses = (pi.y > point.y) != (pj.y > point.y)
+        if crosses {
+            let x = (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x
+            if point.x < x {
+                isInside.toggle()
+            }
+        }
+        j = i
+    }
+
+    return isInside
 }

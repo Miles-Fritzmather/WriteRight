@@ -33,6 +33,7 @@ struct PrototypeToolToolbar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var toolButtons: some View {

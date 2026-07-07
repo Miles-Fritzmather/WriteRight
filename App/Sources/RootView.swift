@@ -60,6 +60,21 @@ private struct PrototypeHUD: View {
                 AppButton(label: "New note") { model.newNote() }
                 AppButton(label: "Save") { model.saveNote() }
                 AppMenuButton(label: "Load", actions: loadActions)
+                AppButton(label: "Delete selected") { model.deleteSelection() }
+            }
+            .font(.caption)
+            HStack(spacing: 8) {
+                AppButton(label: "L") { model.translateSelection(dx: -28, dy: 0) }
+                AppButton(label: "R") { model.translateSelection(dx: 28, dy: 0) }
+                AppButton(label: "U") { model.translateSelection(dx: 0, dy: -28) }
+                AppButton(label: "D") { model.translateSelection(dx: 0, dy: 28) }
+            }
+            .font(.caption)
+            HStack(spacing: 8) {
+                AppButton(label: "Scale -") { model.scaleSelection(by: 0.88) }
+                AppButton(label: "Scale +") { model.scaleSelection(by: 1.14) }
+                AppButton(label: "Rot -") { model.rotateSelection(by: -12) }
+                AppButton(label: "Rot +") { model.rotateSelection(by: 12) }
             }
             .font(.caption)
             if let storageMessage = model.storageMessage {

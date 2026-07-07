@@ -8,6 +8,7 @@ enum PrototypeToolKind: String, CaseIterable, Codable, Identifiable {
     case marker
     case highlighter
     case eraser
+    case selection
 
     var id: Self { self }
 
@@ -18,6 +19,7 @@ enum PrototypeToolKind: String, CaseIterable, Codable, Identifiable {
         case .marker: "Marker"
         case .highlighter: "Highlight"
         case .eraser: "Eraser"
+        case .selection: "Select"
         }
     }
 
@@ -28,6 +30,7 @@ enum PrototypeToolKind: String, CaseIterable, Codable, Identifiable {
         case .marker: .systemSymbol("paintbrush.pointed")
         case .highlighter: .systemSymbol("highlighter")
         case .eraser: .systemSymbol("eraser")
+        case .selection: .systemSymbol("lasso")
         }
     }
 }
@@ -138,6 +141,8 @@ struct PrototypeToolStyle: Codable, Equatable {
             PrototypeToolStyle(kind: kind, color: highlighterColor, width: 18, opacity: 0.36, pressureSensitive: false, blendMode: .multiply)
         case .eraser:
             PrototypeToolStyle(kind: kind, color: inkColor, width: 34, opacity: 1, pressureSensitive: false, blendMode: .clear)
+        case .selection:
+            PrototypeToolStyle(kind: kind, color: inkColor, width: 2, opacity: 1, pressureSensitive: false, blendMode: .normal)
         }
     }
 }
