@@ -1,0 +1,73 @@
+# Generated project — never hand-edit the .xcodeproj; run `xcodegen generate`.
+name: WriteRight
+options:
+  bundleIdPrefix: com.milesfritzmather
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+
+packages:
+  Model:
+    path: Packages/Model
+  CanvasCore:
+    path: Packages/CanvasCore
+  Inject:
+    url: https://github.com/krzysztofzablocki/Inject
+    from: "1.2.4"
+  # Device-side hot-reload client; DEBUG-only code, inert without the
+  # InjectionNext Mac app running (SPEC §11).
+  InjectionNext:
+    url: https://github.com/johnno1962/InjectionNext
+    from: "2.0.0"
+
+targets:
+  WriteRight:
+    type: application
+    platform: iOS
+    sources:
+      - path: App/Sources
+    dependencies:
+      - package: Model
+      - package: CanvasCore
+      - package: Inject
+      - package: InjectionNext
+    info:
+      path: App/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: WriteRight
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations~ipad:
+          [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown,
+           UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UIRequiresFullScreen: false
+        UIUserInterfaceStyle: Automatic
+        NSLocalNetworkUsageDescription: "Debug builds connect to the InjectionNext app on your Mac for hot reloading."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.milesfritzmather.writeright
+        TARGETED_DEVICE_FAMILY: "2"
+        SWIFT_VERSION: "6.0"
+        SUPPORTS_MACCATALYST: false
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: YG4U27L96Y
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 0.1.0
+      configs:
+        debug:
+          # Required by Inject/InjectionNext hot reload (SPEC §11).
+          OTHER_LDFLAGS: ["-Xlinker", "-interposable"]
+          # Lets InjectionIII/InjectionNext recover per-file compiler
+          # commands from build logs on newer Xcode versions.
+          EMIT_FRONTEND_COMMAND_LINES: "YES"
+
+schemes:
+  WriteRight:
+    build:
+      targets:
+        WriteRight: all
+    run:
+      config: Debug
+      environmentVariables:
+        # InjectionNext auto-file-watches this project when the app is
+        # launched from Xcode; harmless elsewhere.
+        INJECTION_PROJECT_ROOT: $(SRCROOT)
