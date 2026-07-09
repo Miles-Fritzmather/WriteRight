@@ -1,7 +1,11 @@
 import SwiftUI
 
-struct PrototypeToolToolbar: View {
-    @Bindable var model: PrototypeCanvasModel
+/// The home page's pen palette. Same Theme primitives and layout as the
+/// editor's `PrototypeToolToolbar`, so the library desk and the canvas feel
+/// like one continuous surface — but bound to `PrototypeHomeToolModel` and
+/// scoped to the tools that do something on a library page.
+struct PrototypeHomeToolbar: View {
+    @Bindable var model: PrototypeHomeToolModel
 
     var body: some View {
         AppToolbarContainer {
@@ -21,15 +25,11 @@ struct PrototypeToolToolbar: View {
     private var toolbarContent: some View {
         HStack(spacing: 12) {
             toolButtons
-            if model.selectedStrokeCount > 0 {
-                AppDivider(height: 42, key: "tools-selection")
-                selectionActions
-            }
-            AppDivider(height: 42, key: "tools-ink")
+            AppDivider(height: 42, key: "home-tools-ink")
             palette(title: "Ink", colors: PrototypeInkColor.inkPalette) { color in
                 model.selectInkColor(color)
             }
-            AppDivider(height: 42, key: "ink-highlighter")
+            AppDivider(height: 42, key: "home-ink-highlighter")
             palette(title: "Highlighter", colors: PrototypeInkColor.highlighterPalette) { color in
                 model.selectHighlighterColor(color)
             }
@@ -41,7 +41,7 @@ struct PrototypeToolToolbar: View {
 
     private var toolButtons: some View {
         HStack(spacing: 4) {
-            ForEach(PrototypeToolKind.allCases) { tool in
+            ForEach(PrototypeHomeToolModel.homeTools) { tool in
                 AppIconButton(
                     source: tool.icon,
                     title: tool.title,
@@ -49,20 +49,6 @@ struct PrototypeToolToolbar: View {
                 ) {
                     model.selectTool(tool)
                 }
-            }
-        }
-    }
-
-    private var selectionActions: some View {
-        HStack(spacing: 4) {
-            AppLabel(text: "Selected")
-                .padding(.trailing, 2)
-            AppIconButton(
-                source: .builtIn(name: "trash", fallbackSymbol: "trash"),
-                title: "Delete",
-                isSelected: false
-            ) {
-                model.deleteSelection()
             }
         }
     }
@@ -93,42 +79,5 @@ struct PrototypeToolToolbar: View {
         } else {
             model.selectedInkColor == color
         }
-    }
-}
-
-struct PrototypePencilQuickToolbar: View {
-    @Bindable var model: PrototypeCanvasModel
-
-    static let popupSize = CGSize(width: 380, height: 118)
-
-    private let tools: [PrototypeToolKind] = [.pen, .pencil, .marker, .highlighter, .eraser]
-
-    var body: some View {
-        AppArcToolbarContainer {
-            HStack(alignment: .bottom, spacing: 4) {
-                ForEach(Array(tools.enumerated()), id: \.element.id) { index, tool in
-                    AppIconButton(
-                        source: tool.icon,
-                        title: tool.title,
-                        isSelected: model.selectedTool == tool
-                    ) {
-                        model.selectTool(tool)
-                    }
-                    .offset(y: arcOffset(for: index))
-                }
-            }
-            .padding(.top, 36)
-            .padding(.horizontal, 12)
-            .padding(.bottom, 8)
-            .fixedSize(horizontal: true, vertical: false)
-            .frame(width: Self.popupSize.width, height: Self.popupSize.height)
-        }
-        .accessibilityElement(children: .contain)
-    }
-
-    private func arcOffset(for index: Int) -> CGFloat {
-        guard tools.count > 1 else { return 0 }
-        let progress = Double(index) / Double(tools.count - 1)
-        return -CGFloat(sin(progress * .pi) * 30)
     }
 }

@@ -25,12 +25,12 @@ enum PrototypeToolKind: String, CaseIterable, Codable, Identifiable {
 
     var icon: IconSource {
         switch self {
-        case .pen: .systemSymbol("pencil.tip")
-        case .pencil: .systemSymbol("pencil")
-        case .marker: .systemSymbol("paintbrush.pointed")
-        case .highlighter: .systemSymbol("highlighter")
-        case .eraser: .systemSymbol("eraser")
-        case .selection: .systemSymbol("lasso")
+        case .pen: .builtIn(name: "pen", fallbackSymbol: "pencil.tip")
+        case .pencil: .builtIn(name: "pencil", fallbackSymbol: "pencil")
+        case .marker: .builtIn(name: "marker", fallbackSymbol: "paintbrush.pointed")
+        case .highlighter: .builtIn(name: "highlighter", fallbackSymbol: "highlighter")
+        case .eraser: .builtIn(name: "eraser", fallbackSymbol: "eraser")
+        case .selection: .builtIn(name: "lasso", fallbackSymbol: "lasso")
         }
     }
 }

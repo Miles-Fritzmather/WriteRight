@@ -3,24 +3,39 @@ import SwiftUI
 /// SwiftUI wrapper for the Phase 0 canvas.
 struct CanvasPrototypeView: UIViewRepresentable {
     let model: PrototypeCanvasModel
-    /// Passed as a plain value (not read off `model` in here) so SwiftUI
-    /// reliably re-runs `updateUIView` when the HUD toggle flips.
-    let fingerDrawing: Bool
     let toolStyle: PrototypeToolStyle
 
     func makeUIView(context: Context) -> CanvasPrototypeUIView {
         let view = CanvasPrototypeUIView()
-        view.fingerDrawingEnabled = fingerDrawing
         view.toolStyle = toolStyle
-        view.onChange = { [weak model] camera, strokeCount in
-            model?.apply(camera: camera, strokeCount: strokeCount)
+        view.pageType = model.currentPageType
+        view.pageCount = model.currentPageCount
+        view.onChange = { [weak model] camera, strokeCount, selectedStrokeCount in
+            model?.apply(
+                camera: camera,
+                strokeCount: strokeCount,
+                selectedStrokeCount: selectedStrokeCount
+            )
         }
-        model.canvasView = view
+        view.onPencilQuickAccess = { [weak model] anchor in
+            model?.togglePencilQuickToolbar(at: anchor)
+        }
+        view.onPageCountChange = { [weak model] pageCount in
+            model?.currentPageCount = pageCount
+        }
+        model.attach(view)
         return view
     }
 
     func updateUIView(_ view: CanvasPrototypeUIView, context: Context) {
-        view.fingerDrawingEnabled = fingerDrawing
         view.toolStyle = toolStyle
+        view.pageType = model.currentPageType
+        view.pageCount = model.currentPageCount
+        view.onPencilQuickAccess = { [weak model] anchor in
+            model?.togglePencilQuickToolbar(at: anchor)
+        }
+        view.onPageCountChange = { [weak model] pageCount in
+            model?.currentPageCount = pageCount
+        }
     }
 }

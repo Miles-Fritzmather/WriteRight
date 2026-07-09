@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WriteRight — Sketch Playground</title>
+<!--
+  Reference implementation for Packages/SketchKit (hand-drawn UI engine, early Phase 8 de-risk).
+  Pipeline + function names mirror the planned Swift API:
+
+    skeleton  -> buildSkeleton()   element geometry as polyline "strokes"
+    resample  -> resample()        even arc-length sampling
+    wobble    -> wobble()          deterministic seeded displacement (the hand-drawn look)
+    ribbon    -> ribbonGeom()      variable-width ink polygon (the "ink" look)
+    boil      -> variant cycling   N pre-generated wobbles swapped at low fps
+    scribble  -> entrance schedule write-on by arc length, stroke by stroke
+
+  Tune with the sliders, then "copy parameters" — the JSON keys map 1:1 onto SketchStyle in Swift.
+  Label glyphs: Hershey "futural" single-stroke font (public domain), embedded below.
+-->
+<style>
+  :root{
+    --chrome:#1d1b18; --chrome2:#26231f; --text:#e8e2d6; --dim:#9a9285;
+    --accent:#e0b64c; --paper:#f7f2e7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.45 ui-rounded,-apple-system,"Segoe UI",sans-serif;background:var(--chrome);color:var(--text)}
+  #app{max-width:1060px;margin:0 auto;padding:14px}
+  header{display:flex;align-items:baseline;gap:10px;margin:2px 2px 10px}
+  header h1{font-size:17px;margin:0;letter-spacing:.2px}
+  header span{color:var(--dim);font-size:12px}
+  #stage-wrap{position:relative;background:var(--paper);border-radius:10px;overflow:hidden;
+    box-shadow:0 2px 14px rgba(0,0,0,.45)}
+  #stage{display:block;width:100%;height:380px;touch-action:none;cursor:pointer}
+  #stage-hud{position:absolute;top:10px;left:10px;display:flex;gap:6px}
+  #stage-hud button{font:12px inherit;padding:4px 10px;border-radius:14px;border:1.5px solid #4a443a;
+    background:rgba(255,255,255,.55);color:#3a352d;cursor:pointer}
+  #stage-hud button:hover{background:rgba(255,255,255,.85)}
+  #controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(235px,1fr));gap:10px;margin-top:12px}
+  fieldset{border:1px solid #3a362f;border-radius:8px;background:var(--chrome2);padding:8px 10px 10px;margin:0;min-width:0}
+  legend{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--accent);padding:0 4px}
+  .row{display:grid;grid-template-columns:1fr 92px 44px;align-items:center;gap:8px;margin:3px 0}
+  .row label{font-size:12.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row output{font:11px ui-monospace,monospace;color:var(--dim);text-align:right}
+  input[type=range]{width:100%;accent-color:var(--accent);margin:0}
+  input[type=text]{width:100%;background:#141311;color:var(--text);border:1px solid #3a362f;border-radius:5px;padding:4px 7px;font:13px inherit}
+  .check{display:flex;align-items:center;gap:6px;font-size:12.5px;margin:5px 0}
+  .check input{accent-color:var(--accent)}
+  #export{grid-column:1 / -1}
+  #export textarea{width:100%;height:52px;background:#141311;color:#b8b0a0;border:1px solid #3a362f;border-radius:5px;
+    font:11px ui-monospace,monospace;padding:6px;resize:vertical}
+  #export .bar{display:flex;gap:8px;align-items:center;margin-top:6px}
+  #export button{font:12px inherit;padding:4px 12px;border-radius:5px;border:1px solid #4a443a;background:#332f28;color:var(--text);cursor:pointer}
+  #export button:hover{background:#403a31}
+  #copied{color:var(--accent);font-size:12px;opacity:0;transition:opacity .3s}
+</style>
+</head>
+<body>
+<div id="app">
+  <header><h1>WriteRight — sketch playground</h1><span>reference for Packages/SketchKit · tap the button</span></header>
+  <div id="stage-wrap">
+    <canvas id="stage"></canvas>
+    <div id="stage-hud">
+      <button id="replayBtn">replay entrance</button>
+      <button id="boilBtn">pause boil</button>
+      <button id="seedBtn">new seed</button>
+    </div>
+  </div>
+  <div id="controls"></div>
+</div>
+
+<script type="text/plain" id="hershey-futural">12345  1JZ
+12345  9MWRFRT RRYQZR[SZRY
+12345  6JZNFNM RVFVM
+12345 12H]SBLb RYBRb RLOZO RKUYU
+12345 27H\PBP_ RTBT_ RYIWGTFPFMGKIKKLMMNOOUQWRXSYUYXWZT[P[MZKX
+12345 32F^[FI[ RNFPHPJOLMMKMIKIIJGLFNFPGSHVHYG[F RWTUUTWTYV[X[ZZ[X[VYTWT
+12345 35E_\O\N[MZMYNXPVUTXRZP[L[JZIYHWHUISJRQNRMSKSIRGPFNGMIMKNNPQUXWZY[[[\Z\Y
+12345  8MWRHQGRFSGSIRKQL
+12345 11KYVBTDRGPKOPOTPYR]T`Vb
+12345 11KYNBPDRGTKUPUTTYR]P`Nb
+12345  9JZRLRX RMOWU RWOMU
+12345  6E_RIR[ RIR[R
+12345  8NVSWRXQWRVSWSYQ[
+12345  3E_IR[R
+12345  6NVRVQWRXSWRV
+12345  3G][BIb
+12345 18H\QFNGLJKOKRLWNZQ[S[VZXWYRYOXJVGSFQF
+12345  5H\NJPISFS[
+12345 15H\LKLJMHNGPFTFVGWHXJXLWNUQK[Y[
+12345 16H\MFXFRNUNWOXPYSYUXXVZS[P[MZLYKW
+12345  7H\UFKTZT RUFU[
+12345 18H\WFMFLOMNPMSMVNXPYSYUXXVZS[P[MZLYKW
+12345 24H\XIWGTFRFOGMJLOLTMXOZR[S[VZXXYUYTXQVOSNRNOOMQLT
+12345  6H\YFO[ RKFYF
+12345 30H\PFMGLILKMMONSOVPXRYTYWXYWZT[P[MZLYKWKTLRNPQOUNWMXKXIWGTFPF
+12345 24H\XMWPURRSQSNRLPKMKLLINGQFRFUGWIXMXRWWUZR[P[MZLX
+12345 12NVROQPRQSPRO RRVQWRXSWRV
+12345 14NVROQPRQSPRO RSWRXQWRVSWSYQ[
+12345  4F^ZIJRZ[
+12345  6E_IO[O RIU[U
+12345  4F^JIZRJ[
+12345 21I[LKLJMHNGPFTFVGWHXJXLWNVORQRT RRYQZR[SZRY
+12345 56E`WNVLTKQKOLNMMPMSNUPVSVUUVS RQKOMNPNSOUPV RWKVSVUXVZV\T]Q]O\L[JYHWGTFQFNGLHJJILHOHRIUJWLYNZQ[T[WZYYZX RXKWSWUXV
+12345  9I[RFJ[ RRFZ[ RMTWT
+12345 24G\KFK[ RKFTFWGXHYJYLXNWOTP RKPTPWQXRYTYWXYWZT[K[
+12345 19H]ZKYIWGUFQFOGMILKKNKSLVMXOZQ[U[WZYXZV
+12345 16G\KFK[ RKFRFUGWIXKYNYSXVWXUZR[K[
+12345 12H[LFL[ RLFYF RLPTP RL[Y[
+12345  9HZLFL[ RLFYF RLPTP
+12345 23H]ZKYIWGUFQFOGMILKKNKSLVMXOZQ[U[WZYXZVZS RUSZS
+12345  9G]KFK[ RYFY[ RKPYP
+12345  3NVRFR[
+12345 11JZVFVVUYTZR[P[NZMYLVLT
+12345  9G\KFK[ RYFKT RPOY[
+12345  6HYLFL[ RL[X[
+12345 12F^JFJ[ RJFR[ RZFR[ RZFZ[
+12345  9G]KFK[ RKFY[ RYFY[
+12345 22G]PFNGLIKKJNJSKVLXNZP[T[VZXXYVZSZNYKXIVGTFPF
+12345 14G\KFK[ RKFTFWGXHYJYMXOWPTQKQ
+12345 25G]PFNGLIKKJNJSKVLXNZP[T[VZXXYVZSZNYKXIVGTFPF RSWY]
+12345 17G\KFK[ RKFTFWGXHYJYLXNWOTPKP RRPY[
+12345 21H\YIWGTFPFMGKIKKLMMNOOUQWRXSYUYXWZT[P[MZKX
+12345  6JZRFR[ RKFYF
+12345 11G]KFKULXNZQ[S[VZXXYUYF
+12345  6I[JFR[ RZFR[
+12345 12F^HFM[ RRFM[ RRFW[ R\FW[
+12345  6H\KFY[ RYFK[
+12345  7I[JFRPR[ RZFRP
+12345  9H\YFK[ RKFYF RK[Y[
+12345 12KYOBOb RPBPb ROBVB RObVb
+12345  3KYKFY^
+12345 12KYTBTb RUBUb RNBUB RNbUb
+12345  6JZRDJR RRDZR
+12345  3I[Ib[b
+12345  8NVSKQMQORPSORNQO
+12345 18I\XMX[ RXPVNTMQMONMPLSLUMXOZQ[T[VZXX
+12345 18H[LFL[ RLPNNPMSMUNWPXSXUWXUZS[P[NZLX
+12345 15I[XPVNTMQMONMPLSLUMXOZQ[T[VZXX
+12345 18I\XFX[ RXPVNTMQMONMPLSLUMXOZQ[T[VZXX
+12345 18I[LSXSXQWOVNTMQMONMPLSLUMXOZQ[T[VZXX
+12345  9MYWFUFSGRJR[ ROMVM
+12345 23I\XMX]W`VaTbQbOa RXPVNTMQMONMPLSLUMXOZQ[T[VZXX
+12345 11I\MFM[ RMQPNRMUMWNXQX[
+12345  9NVQFRGSFREQF RRMR[
+12345 12MWRFSGTFSERF RSMS^RaPbNb
+12345  9IZMFM[ RWMMW RQSX[
+12345  3NVRFR[
+12345 19CaGMG[ RGQJNLMOMQNRQR[ RRQUNWMZM\N]Q][
+12345 11I\MMM[ RMQPNRMUMWNXQX[
+12345 18I\QMONMPLSLUMXOZQ[T[VZXXYUYSXPVNTMQM
+12345 18H[LMLb RLPNNPMSMUNWPXSXUWXUZS[P[NZLX
+12345 18I\XMXb RXPVNTMQMONMPLSLUMXOZQ[T[VZXX
+12345  9KXOMO[ ROSPPRNTMWM
+12345 18J[XPWNTMQMNNMPNRPSUTWUXWXXWZT[Q[NZMX
+12345  9MYRFRWSZU[W[ ROMVM
+12345 11I\MMMWNZP[S[UZXW RXMX[
+12345  6JZLMR[ RXMR[
+12345 12G]JMN[ RRMN[ RRMV[ RZMV[
+12345  6J[MMX[ RXMM[
+12345 10JZLMR[ RXMR[P_NaLbKb
+12345  9J[XMM[ RMMXM RM[X[
+12345 40KYTBRCQDPFPHQJRKSMSOQQ RRCQEQGRISJTLTNSPORSTTVTXSZR[Q]Q_Ra RQSSUSWRYQZP\P^Q`RaTb
+12345  3NVRBRb
+12345 40KYPBRCSDTFTHSJRKQMQOSQ RRCSESGRIQJPLPNQPURQTPVPXQZR[S]S_Ra RSSQUQWRYSZT\T^S`RaPb
+12345 24F^IUISJPLONOPPTSVTXTZS[Q RISJQLPNPPQTTVUXUZT[Q[O
+12345 35JZJFJ[K[KFLFL[M[MFNFN[O[OFPFP[Q[QFRFR[S[SFTFT[U[UFVFV[W[WFXFX[Y[YFZFZ[</script>
+
+<script>
+"use strict";
+/* ============================================================
+   Parameters — keys map 1:1 onto the future Swift SketchStyle
+   ============================================================ */
+const P = {
+  seed: 7,
+  // layout
+  labelText: "press me", labelSize: 34,
+  buttonW: 280, buttonH: 100, overshoot: 10, cornerR: 14,
+  // wobble (labelWobble scales amplitude+jitter down for text legibility)
+  spacing: 5, amplitude: 2.2, wavelength: 38, jitter: 2.5, labelWobble: 0.35,
+  // boil
+  boilFps: 9, variants: 3,
+  // ink
+  inkWidth: 3.4, widthVar: 0.5, taper: 14,
+  ghost: true, ghostAlpha: 0.28, ghostOffset: 2,
+  // scribble (entrance)
+  penSpeed: 1400, strokePause: 60,
+  // press
+  pressWidthMul: 1.35, pressSquash: 0.94, hatchSpacing: 13,
+  // palette
+  ink: "#2b2723", paper: "#f7f2e7",
+};
+
+/* ============================================================
+   Deterministic RNG — same construction planned for Swift
+   ============================================================ */
+function mulberry32(seed){ let a = seed>>>0; return function(){
+  a |= 0; a = a + 0x6D2B79F5 | 0;
+  let t = Math.imul(a ^ a>>>15, 1 | a);
+  t = t + Math.imul(t ^ t>>>7, 61 | t) ^ t;
+  return ((t ^ t>>>14) >>> 0) / 4294967296;
+};}
+function hash3(a,b,c){
+  let h = 2166136261 ^ a; h = Math.imul(h,16777619) ^ b; h = Math.imul(h,16777619) ^ c;
+  return h>>>0;
+}
+const dist=(a,b)=>Math.hypot(b.x-a.x,b.y-a.y);
+const smooth=f=>f*f*(3-2*f);
+
+/* ============================================================
+   Hershey futural (single-stroke, public domain)
+   ============================================================ */
+function parseHershey(text){
+  const glyphs=[];
+  for(const raw of text.split("\n")){
+    const line=raw.replace(/\r$/,""); if(!line.trim()) continue;
+    const numV=parseInt(line.slice(5,8),10);
+    const d=line.slice(8);
+    const lm=d.charCodeAt(0)-82, rm=d.charCodeAt(1)-82;
+    const strokes=[]; let cur=[];
+    for(let p=1;p<numV;p++){
+      const i=p*2;
+      if(d[i]===" " && d[i+1]==="R"){ if(cur.length>1) strokes.push(cur); cur=[]; }
+      else cur.push({x:d.charCodeAt(i)-82, y:d.charCodeAt(i+1)-82});
+    }
+    if(cur.length>1) strokes.push(cur);
+    glyphs.push({lm,rm,strokes});
+  }
+  return glyphs;
+}
+const FONT = parseHershey(document.getElementById("hershey-futural").textContent);
+
+/* Returns strokes (glyph order = writing order) for a text line, centered at (cx, cy). */
+function textStrokes(str, size, cx, cy, rng){
+  const scale=size/21; // Hershey caps span y=-12..9 (21 units)
+  let penX=0; const out=[];
+  for(const ch of str){
+    const code=ch.charCodeAt(0)-32;
+    const g=FONT[code>=0&&code<FONT.length?code:0];
+    for(const s of g.strokes)
+      out.push(s.map(p=>({x:(penX + p.x - g.lm)*scale, y:p.y*scale})));
+    penX += (g.rm-g.lm) + (rng?(rng()-0.5)*1.6:0); // slight letter-spacing jitter
+  }
+  // center the bounding box on (cx, cy)
+  let minX=1e9,maxX=-1e9,minY=1e9,maxY=-1e9;
+  for(const s of out) for(const p of s){
+    if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x;
+    if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y;
+  }
+  if(minX>maxX) return [];
+  const ox=cx-(minX+maxX)/2, oy=cy-(minY+maxY)/2;
+  return out.map(s=>s.map(p=>({x:p.x+ox, y:p.y+oy})));
+}
+
+/* ============================================================
+   Geometry pipeline: resample -> wobble -> ribbon
+   ============================================================ */
+function resample(pts, spacing){
+  if(pts.length<2) return pts.slice();
+  const out=[pts[0]]; let prev=pts[0], acc=0;
+  for(let i=1;i<pts.length;i++){
+    let cur=pts[i], d=dist(prev,cur);
+    while(acc+d>=spacing && d>1e-6){
+      const t=(spacing-acc)/d;
+      const np={x:prev.x+(cur.x-prev.x)*t, y:prev.y+(cur.y-prev.y)*t};
+      out.push(np); prev=np; d=dist(prev,cur); acc=0;
+    }
+    acc+=d; prev=cur;
+  }
+  const last=pts[pts.length-1];
+  if(dist(out[out.length-1],last)>spacing*0.25) out.push(last);
+  return out;
+}
+
+function arcLengths(pts){
+  const cum=[0];
+  for(let i=1;i<pts.length;i++) cum.push(cum[i-1]+dist(pts[i-1],pts[i]));
+  return cum;
+}
+
+/* Smooth low-frequency noise sampled along arc length. */
+function noiseCurve(total, wavelength, rng){
+  const k=Math.max(2, Math.ceil(total/Math.max(4,wavelength))+1);
+  const ctrl=Array.from({length:k},()=>rng()*2-1);
+  return s=>{ // s in [0, total]
+    const u=Math.min(0.9999, Math.max(0, s/total))*(k-1);
+    const i=Math.floor(u), f=smooth(u-i);
+    return ctrl[i]*(1-f)+ctrl[i+1]*f;
+  };
+}
+
+function wobble(pts, prm, rng){
+  const n=pts.length; if(n<2) return pts.slice();
+  const cum=arcLengths(pts), total=cum[n-1]||1;
+  const nN=noiseCurve(total, prm.wavelength, rng);
+  const nT=noiseCurve(total, prm.wavelength*0.7, rng);
+  const e0={x:(rng()-0.5)*2*prm.jitter, y:(rng()-0.5)*2*prm.jitter};
+  const e1={x:(rng()-0.5)*2*prm.jitter, y:(rng()-0.5)*2*prm.jitter};
+  const out=new Array(n);
+  for(let i=0;i<n;i++){
+    const a=pts[Math.max(0,i-1)], b=pts[Math.min(n-1,i+1)];
+    let tx=b.x-a.x, ty=b.y-a.y; const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
+    const nx=-ty, ny=tx;
+    const oN=nN(cum[i])*prm.amplitude, oT=nT(cum[i])*prm.amplitude*0.35;
+    const w0=Math.max(0,1-cum[i]/25), w1=Math.max(0,1-(total-cum[i])/25);
+    out[i]={
+      x:pts[i].x + nx*oN + tx*oT + e0.x*w0 + e1.x*w1,
+      y:pts[i].y + ny*oN + ty*oT + e0.y*w0 + e1.y*w1,
+    };
+  }
+  return out;
+}
+
+/* Variable-width ink ribbon around a centerline. */
+function ribbonGeom(pts, baseW, widthVar, taper, rng){
+  const n=pts.length; if(n<2) return null;
+  const cum=arcLengths(pts), total=cum[n-1]||1;
+  const wn=noiseCurve(total, 30, rng);
+  const left=new Array(n), right=new Array(n);
+  for(let i=0;i<n;i++){
+    const a=pts[Math.max(0,i-1)], b=pts[Math.min(n-1,i+1)];
+    let tx=b.x-a.x, ty=b.y-a.y; const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
+    const nx=-ty, ny=tx;
+    let w=baseW*(1+widthVar*wn(cum[i]));
+    const tp=taper>0?Math.min(1, cum[i]/taper, (total-cum[i])/taper):1;
+    w*=0.22+0.78*Math.max(0.05,tp);
+    left[i] ={x:pts[i].x+nx*w/2, y:pts[i].y+ny*w/2};
+    right[i]={x:pts[i].x-nx*w/2, y:pts[i].y-ny*w/2};
+  }
+  return {pts, left, right, cum, total};
+}
+function ribbonPath(g, upto){
+  const m=(upto===undefined)?g.left.length-1:Math.max(1,Math.min(upto,g.left.length-1));
+  const p=new Path2D();
+  p.moveTo(g.left[0].x,g.left[0].y);
+  for(let i=1;i<=m;i++) p.lineTo(g.left[i].x,g.left[i].y);
+  for(let i=m;i>=0;i--) p.lineTo(g.right[i].x,g.right[i].y);
+  p.closePath(); return p;
+}
+function centerPath(pts, upto){
+  const m=(upto===undefined)?pts.length-1:Math.max(1,Math.min(upto,pts.length-1));
+  const p=new Path2D(); p.moveTo(pts[0].x,pts[0].y);
+  for(let i=1;i<=m;i++) p.lineTo(pts[i].x,pts[i].y);
+  return p;
+}
+/* Index of the point at arc length L (for partial scribble rendering). */
+function indexAtLength(g, L){
+  const c=g.cum; let lo=0, hi=c.length-1;
+  if(L>=g.total) return hi;
+  while(lo<hi){ const mid=(lo+hi)>>1; if(c[mid]<L) lo=mid+1; else hi=mid; }
+  return Math.max(1,lo);
+}
+
+/* ============================================================
+   Skeletons — the "ideal" geometry the wobble roughs up
+   ============================================================ */
+function line(a,b){ return [a,b]; }
+
+/* Button border. cornerR < 1: four overshooting side strokes (sketchbook box).
+   cornerR >= 1: one continuous swoop around a rounded rect, closing with an
+   overlap past the start point (overshoot doubles as overlap length). */
+function borderStrokes(x,y,w,h,over,cornerR){
+  const r=Math.min(cornerR, Math.min(w,h)/2-2);
+  if(r<1) return [
+    line({x:x-over,   y:y},       {x:x+w+over, y:y}),        // top
+    line({x:x+w,      y:y-over},  {x:x+w,      y:y+h+over}), // right
+    line({x:x+w+over, y:y+h},     {x:x-over,   y:y+h}),      // bottom (drawn right-to-left)
+    line({x:x,        y:y+h+over},{x:x,        y:y-over}),   // left  (drawn bottom-to-top)
+  ];
+  const pts=[];
+  const arc=(cx,cy,a0,a1)=>{
+    const steps=Math.max(3,Math.ceil(r*Math.abs(a1-a0)/4));
+    for(let i=1;i<=steps;i++){
+      const a=a0+(a1-a0)*i/steps;
+      pts.push({x:cx+Math.cos(a)*r, y:cy+Math.sin(a)*r});
+    }};
+  const sx=x+w*0.32;                       // pen starts partway along the top edge
+  pts.push({x:sx,y:y});
+  pts.push({x:x+w-r,y:y});  arc(x+w-r,y+r,   -Math.PI/2, 0);
+  pts.push({x:x+w,y:y+h-r});arc(x+w-r,y+h-r,  0,          Math.PI/2);
+  pts.push({x:x+r,y:y+h});  arc(x+r,  y+h-r,  Math.PI/2,  Math.PI);
+  pts.push({x:x,y:y+r});    arc(x+r,  y+r,    Math.PI,    Math.PI*1.5);
+  pts.push({x:sx+Math.max(2,over),y:y});   // retrace + overlap past the start
+  return [pts];
+}
+
+/* Diagonal hatch fill for the pressed state. */
+function hatchStrokes(x,y,w,h,spacingPx){
+  const inset=7, ang=-Math.PI/4.6;
+  const dx=Math.cos(ang), dy=Math.sin(ang);
+  const x0=x+inset, y0=y+inset, iw=w-2*inset, ih=h-2*inset;
+  const out=[]; let flip=false;
+  // sweep lines of direction (dx,dy) across the inner rect
+  const proj=p=>p.x*(-dy)+p.y*dx; // signed distance across the hatch direction
+  const corners=[{x:x0,y:y0},{x:x0+iw,y:y0},{x:x0,y:y0+ih},{x:x0+iw,y:y0+ih}];
+  const lo=Math.min(...corners.map(proj)), hi=Math.max(...corners.map(proj));
+  for(let s=lo+spacingPx/2; s<hi; s+=spacingPx){
+    // clip the infinite line {base + t*(dx,dy)} to the inner rect
+    const base={x:(-dy)*s, y:dx*s};
+    let t0=-1e9,t1=1e9;
+    const clip=(p0,d,min,max)=>{ if(Math.abs(d)<1e-9) return p0>=min&&p0<=max?[ -1e9,1e9 ]:null;
+      let a=(min-p0)/d, b=(max-p0)/d; return a<b?[a,b]:[b,a]; };
+    const cx=clip(base.x,dx,x0,x0+iw), cy=clip(base.y,dy,y0,y0+ih);
+    if(!cx||!cy) continue;
+    t0=Math.max(cx[0],cy[0]); t1=Math.min(cx[1],cy[1]);
+    if(t1-t0<4) continue;
+    let a={x:base.x+dx*t0,y:base.y+dy*t0}, b={x:base.x+dx*t1,y:base.y+dy*t1};
+    if(flip) [a,b]=[b,a]; flip=!flip; // zig-zag pen travel
+    out.push(line(a,b));
+  }
+  return out;
+}
+
+/* ============================================================
+   Build + cache: per state, per boil variant, realized ink
+   ============================================================ */
+const stage=document.getElementById("stage");
+const ctx=stage.getContext("2d");
+let cssW=0, cssH=0;
+
+function buttonRect(){
+  return {x:(cssW-P.buttonW)/2, y:(cssH-P.buttonH)/2 - 14, w:P.buttonW, h:P.buttonH};
+}
+
+function buildSkeleton(state){ // state: "normal" | "pressed"
+  const r=buttonRect();
+  const rng=mulberry32(hash3(P.seed, 999, 0));
+  const strokes=[
+    ...borderStrokes(r.x,r.y,r.w,r.h,P.overshoot,P.cornerR).map(pts=>({pts, kind:"border"})),
+    ...textStrokes(P.labelText, P.labelSize, r.x+r.w/2, r.y+r.h/2, rng).map(pts=>({pts, kind:"label"})),
+  ];
+  if(state==="pressed")
+    strokes.push(...hatchStrokes(r.x,r.y,r.w,r.h,P.hatchSpacing).map(pts=>({pts, kind:"hatch"})));
+  return strokes;
+}
+
+/* realize one boil variant: wobble + ribbon every stroke */
+function realize(skeleton, variant, state){
+  const widthMul=(state==="pressed")?P.pressWidthMul:1;
+  return skeleton.map((s,k)=>{
+    const rng=mulberry32(hash3(P.seed, k*7+variant, state==="pressed"?1:0));
+    const rs=resample(s.pts, P.spacing);
+    // text wobbles less than shapes so it stays legible
+    const wprm=s.kind==="label"
+      ? {...P, amplitude:P.amplitude*P.labelWobble, jitter:P.jitter*P.labelWobble}
+      : P;
+    const wb=wobble(rs, wprm, rng);
+    const baseW=(s.kind==="hatch"?P.inkWidth*0.8:P.inkWidth)*widthMul;
+    const g=ribbonGeom(wb, baseW, P.widthVar, P.taper, rng);
+    return {kind:s.kind, g, full:ribbonPath(g), center:centerPath(wb),
+            ghostDir:{x:(rng()-0.5)*2*P.ghostOffset, y:(rng()-0.5)*2*P.ghostOffset}};
+  });
+}
+
+let cache={normal:null, pressed:null}; // [variant] -> realized strokes
+let schedule=null;                     // entrance timing from variant 0
+let dirty=true;
+
+function rebuild(){
+  cache.normal =Array.from({length:P.variants},(_,v)=>realize(buildSkeleton("normal"), v,"normal"));
+  cache.pressed=Array.from({length:P.variants},(_,v)=>realize(buildSkeleton("pressed"),v,"pressed"));
+  // entrance schedule: border + label strokes, written in order at constant pen speed
+  let t=0; schedule=cache.normal[0].map(st=>{
+    const start=t; t+=st.g.total/P.penSpeed*1000 + P.strokePause;
+    return {start, dur:st.g.total/P.penSpeed*1000};
+  });
+  dirty=false;
+}
+
+/* ============================================================
+   Counter line + sparks (release feedback)
+   ============================================================ */
+let count=0, counterStrokes=null, counterStart=-1;
+function rebuildCounter(){
+  const r=buttonRect();
+  const rng=mulberry32(hash3(P.seed, 4242, count));
+  const strokes=textStrokes("pressed x"+count, Math.max(14,P.labelSize*0.45),
+                            r.x+r.w/2, r.y+r.h+38, rng);
+  // subtext is small, so it gets even less wobble than the label
+  const cprm={...P, amplitude:P.amplitude*P.labelWobble*0.6, jitter:P.jitter*P.labelWobble*0.6};
+  counterStrokes=Array.from({length:P.variants},(_,v)=>strokes.map((pts,k)=>{
+    const rr=mulberry32(hash3(P.seed+1, k*3+v, count));
+    const g=ribbonGeom(wobble(resample(pts,P.spacing),cprm,rr), P.inkWidth*0.75, P.widthVar, P.taper, rr);
+    return {g, full:ribbonPath(g)};
+  }));
+  counterStart=performance.now();
+}
+let sparks=[]; // {geoms per variant, born}
+function spawnSparks(){
+  const r=buttonRect();
+  const rng=mulberry32(hash3(P.seed, 777, count));
+  const cx=r.x+r.w+6+rng()*10, cy=r.y-6-rng()*8;
+  const rays=[];
+  const n=5+Math.floor(rng()*3);
+  for(let i=0;i<n;i++){
+    const a=-Math.PI*0.05 - rng()*Math.PI*0.55;
+    const r0=6+rng()*5, r1=r0+10+rng()*14;
+    rays.push(line({x:cx+Math.cos(a)*r0,y:cy+Math.sin(a)*r0},
+                   {x:cx+Math.cos(a)*r1,y:cy+Math.sin(a)*r1}));
+  }
+  const geoms=Array.from({length:P.variants},(_,v)=>rays.map((pts,k)=>{
+    const rr=mulberry32(hash3(P.seed+2,k*5+v,count));
+    const g=ribbonGeom(wobble(resample(pts,P.spacing),P,rr), P.inkWidth*0.7, P.widthVar, 6, rr);
+    return ribbonPath(g);
+  }));
+  sparks.push({geoms, born:performance.now()});
+}
+
+/* ============================================================
+   Render loop — boil + scribble + press
+   ============================================================ */
+let enterStart=performance.now();
+let boiling=true, boilFrozen=0;
+let pressed=false, pressStart=0;
+
+function render(now){
+  requestAnimationFrame(render);
+  if(!cssW) return;
+  if(dirty){ rebuild(); }
+  ctx.clearRect(0,0,cssW,cssH);
+
+  const v=boiling ? Math.floor(now/1000*P.boilFps)%P.variants : boilFrozen;
+  const state=pressed?"pressed":"normal";
+  const strokes=cache[state][v];
+  const r=buttonRect();
+
+  ctx.save();
+  if(pressed){ // squash around center
+    const cx=r.x+r.w/2, cy=r.y+r.h/2;
+    ctx.translate(cx,cy); ctx.scale(2-P.pressSquash, P.pressSquash); ctx.translate(-cx,-cy);
+  }
+  ctx.fillStyle=P.ink; ctx.strokeStyle=P.ink;
+
+  const tEnter=now-enterStart;
+  const hatchT=pressed?Math.min(1,(now-pressStart)/130):0;
+  let hatchLenBudget=0;
+  if(pressed){
+    const totalHatch=strokes.filter(s=>s.kind==="hatch").reduce((a,s)=>a+s.g.total,0);
+    hatchLenBudget=totalHatch*hatchT;
+  }
+
+  // hatch first (behind the label), then border + label on top
+  const order=[...strokes.keys()].sort((a,b)=>
+    (strokes[a].kind==="hatch"?0:1)-(strokes[b].kind==="hatch"?0:1));
+  for(const k of order){
+    const st=strokes[k];
+    if(st.kind==="hatch"){
+      if(hatchLenBudget<=0) continue;
+      const take=Math.min(st.g.total, hatchLenBudget); hatchLenBudget-=st.g.total;
+      ctx.globalAlpha=0.45;
+      ctx.fill(take>=st.g.total?st.full:ribbonPath(st.g, indexAtLength(st.g,take)));
+      ctx.globalAlpha=1;
+      continue;
+    }
+    const sch=schedule[k];
+    if(sch && tEnter<sch.start) continue;         // pen hasn't reached this stroke yet
+    if(sch && tEnter<sch.start+sch.dur){          // scribbling this stroke right now
+      const L=(tEnter-sch.start)/1000*P.penSpeed;
+      ctx.fill(ribbonPath(st.g, indexAtLength(st.g,L)));
+      continue;
+    }
+    // completed: ink + optional ghost sketch line from the *next* variant
+    // (ghost only on the border — double lines hurt text legibility)
+    ctx.fill(st.full);
+    if(P.ghost && st.kind==="border"){
+      const gv=cache[state][(v+1)%P.variants][k];
+      ctx.save();
+      ctx.translate(st.ghostDir.x, st.ghostDir.y);
+      ctx.globalAlpha=P.ghostAlpha; ctx.lineWidth=1.1; ctx.lineCap="round";
+      ctx.stroke(gv.center);
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+
+  // counter line
+  if(counterStrokes){
+    const cs=counterStrokes[v], tC=now-counterStart;
+    let budget=tC/1000*P.penSpeed*2.2;
+    ctx.fillStyle=P.ink; ctx.globalAlpha=0.75;
+    for(const st of cs){
+      if(budget<=0) break;
+      const take=Math.min(st.g.total,budget); budget-=st.g.total;
+      ctx.fill(take>=st.g.total?st.full:ribbonPath(st.g,indexAtLength(st.g,take)));
+    }
+    ctx.globalAlpha=1;
+  }
+  // sparks: scribble in fast, fade out
+  const nowMs=now;
+  sparks=sparks.filter(s=>nowMs-s.born<420);
+  for(const s of sparks){
+    const age=nowMs-s.born;
+    const reveal=Math.min(1,age/110);
+    const alpha=age<250?0.9:0.9*(1-(age-250)/170);
+    ctx.globalAlpha=Math.max(0,alpha); ctx.fillStyle=P.ink;
+    const paths=s.geoms[v];
+    const upto=Math.max(1,Math.floor(paths.length*reveal));
+    for(let i=0;i<upto;i++) ctx.fill(paths[i]);
+    ctx.globalAlpha=1;
+  }
+}
+requestAnimationFrame(render);
+
+/* ============================================================
+   Input: press / release on the drawn button
+   ============================================================ */
+function inButton(e){
+  const b=stage.getBoundingClientRect();
+  const x=e.clientX-b.left, y=e.clientY-b.top, r=buttonRect();
+  return x>=r.x-8 && x<=r.x+r.w+8 && y>=r.y-8 && y<=r.y+r.h+8;
+}
+stage.addEventListener("pointerdown",e=>{
+  if(!inButton(e)) return;
+  pressed=true; pressStart=performance.now();
+  stage.setPointerCapture(e.pointerId);
+});
+stage.addEventListener("pointerup",e=>{
+  if(pressed && inButton(e)){ count++; rebuildCounter(); spawnSparks(); }
+  pressed=false;
+});
+stage.addEventListener("pointercancel",()=>pressed=false);
+
+/* ============================================================
+   Controls
+   ============================================================ */
+const SLIDERS=[
+  ["wobble", [
+    ["amplitude","amplitude px",0,8,0.1],
+    ["wavelength","wavelength px",10,120,1],
+    ["jitter","endpoint jitter px",0,8,0.1],
+    ["labelWobble","label wobble ×",0,1,0.05],
+    ["spacing","sample spacing px",2,12,0.5],
+  ]],
+  ["boil", [
+    ["boilFps","boil fps",2,24,1],
+    ["variants","variants",2,6,1],
+  ]],
+  ["ink", [
+    ["inkWidth","base width px",1,8,0.1],
+    ["widthVar","width variance",0,1,0.05],
+    ["taper","end taper px",0,40,1],
+    ["ghostAlpha","ghost alpha",0,0.8,0.02],
+    ["ghostOffset","ghost offset px",0,5,0.1],
+  ]],
+  ["scribble", [
+    ["penSpeed","pen speed px/s",200,4000,50],
+    ["strokePause","stroke pause ms",0,200,5],
+  ]],
+  ["press", [
+    ["pressWidthMul","ink multiplier",1,2,0.05],
+    ["pressSquash","squash",0.85,1,0.005],
+    ["hatchSpacing","hatch spacing px",6,30,0.5],
+  ]],
+  ["layout", [
+    ["buttonW","width px",160,420,2],
+    ["buttonH","height px",60,160,2],
+    ["cornerR","corner radius px",0,40,1],
+    ["overshoot","overshoot / overlap px",0,24,0.5],
+    ["labelSize","label size px",18,60,1],
+  ]],
+];
+const GEOM_KEYS=new Set(["amplitude","wavelength","jitter","labelWobble","spacing","variants",
+  "inkWidth","widthVar","taper","ghostOffset","penSpeed","strokePause","pressWidthMul",
+  "hatchSpacing","buttonW","buttonH","cornerR","overshoot","labelSize"]);
+
+const controls=document.getElementById("controls");
+for(const [name, rows] of SLIDERS){
+  const fs=document.createElement("fieldset");
+  fs.innerHTML=`<legend>${name}</legend>`;
+  for(const [key,label,min,max,step] of rows){
+    const row=document.createElement("div"); row.className="row";
+    row.innerHTML=`<label>${label}</label>
+      <input type="range" min="${min}" max="${max}" step="${step}" value="${P[key]}">
+      <output>${P[key]}</output>`;
+    const input=row.querySelector("input"), out=row.querySelector("output");
+    input.addEventListener("input",()=>{
+      P[key]=parseFloat(input.value); out.textContent=input.value;
+      if(GEOM_KEYS.has(key)){ dirty=true; if(counterStrokes) rebuildCounter(); }
+      updateExport();
+    });
+    fs.appendChild(row);
+  }
+  if(name==="ink"){
+    const c=document.createElement("label"); c.className="check";
+    c.innerHTML=`<input type="checkbox" ${P.ghost?"checked":""}> ghost sketch line`;
+    c.querySelector("input").addEventListener("change",e=>{P.ghost=e.target.checked; updateExport();});
+    fs.appendChild(c);
+  }
+  if(name==="layout"){
+    const t=document.createElement("div");
+    t.innerHTML=`<input type="text" value="${P.labelText}" maxlength="24" aria-label="label text">`;
+    t.querySelector("input").addEventListener("input",e=>{
+      P.labelText=e.target.value; dirty=true; updateExport();
+    });
+    fs.appendChild(t);
+  }
+  controls.appendChild(fs);
+}
+// export box
+const exp=document.createElement("fieldset"); exp.id="export";
+exp.innerHTML=`<legend>parameters → SketchStyle</legend>
+  <textarea readonly></textarea>
+  <div class="bar"><button id="copyBtn">copy parameters</button><span id="copied">copied</span></div>`;
+controls.appendChild(exp);
+const expTA=exp.querySelector("textarea");
+function updateExport(){ expTA.value=JSON.stringify(P); }
+updateExport();
+exp.querySelector("#copyBtn").addEventListener("click",async()=>{
+  try{ await navigator.clipboard.writeText(expTA.value); }
+  catch{ expTA.select(); document.execCommand("copy"); }
+  const c=document.getElementById("copied");
+  c.style.opacity=1; setTimeout(()=>c.style.opacity=0,1200);
+});
+
+// HUD
+document.getElementById("replayBtn").addEventListener("click",()=>{
+  enterStart=performance.now(); count=0; counterStrokes=null; sparks=[];
+});
+document.getElementById("boilBtn").addEventListener("click",e=>{
+  boiling=!boiling;
+  boilFrozen=Math.floor(performance.now()/1000*P.boilFps)%P.variants;
+  e.target.textContent=boiling?"pause boil":"resume boil";
+});
+document.getElementById("seedBtn").addEventListener("click",()=>{
+  P.seed=Math.floor(Math.random()*1e6); dirty=true;
+  if(counterStrokes) rebuildCounter(); updateExport();
+});
+
+/* ============================================================
+   Canvas sizing
+   ============================================================ */
+function resize(){
+  const wrap=document.getElementById("stage-wrap");
+  const w=wrap.clientWidth, h=stage.clientHeight||380;
+  const dpr=window.devicePixelRatio||1;
+  cssW=w; cssH=h;
+  stage.width=Math.round(w*dpr); stage.height=Math.round(h*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  dirty=true; if(counterStrokes) rebuildCounter();
+}
+new ResizeObserver(resize).observe(document.getElementById("stage-wrap"));
+resize();
+</script>
+</body>
+</html>

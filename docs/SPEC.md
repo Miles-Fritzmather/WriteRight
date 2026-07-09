@@ -274,6 +274,25 @@ Availability check with graceful degradation. Features: summarize a page/noteboo
 Implement `HandDrawnTheme` rendering primitives through the ink renderer; add bundled hand-drawn icon assets; build `DrawIconView` so users can draw and save custom icons; wire `IconSource.userDrawn` through the icon system. Add a setting to switch themes.
 - **Done when:** flipping the theme flag swaps the whole UI to hand-drawn with no feature-code changes; a user can draw a custom icon and use it in the tool menu.
 
+> **De-risk note (2026-07-07, approved by Miles):** the hand-drawn rendering
+> engine was prototyped ahead of order, Phase 0-style, to prove the look was
+> achievable: `Packages/SketchKit` implements the deterministic
+> wobble → boil → ink-ribbon → scribble pipeline (parameters tuned in
+> `Prototypes/sketch-playground.html`, kept as the reference implementation),
+> and a single demo button runs behind the Phase 0 HUD's "Sketch demo" button.
+> Phase 8 remains the phase where `HandDrawnTheme` is built on top of
+> SketchKit and wired through `§7`; nothing else was pulled forward.
+>
+> **De-risk note, part 2 (2026-07-08, approved by Miles):** the prototype
+> toolbar and main library screen were moved onto the hand-drawn look ahead
+> of order, exercising `§7` exactly as designed: a partial `HandDrawnTheme`
+> implements the needed Theme primitives via SketchKit (boil, write-on
+> entrance, ghost pass, press squash + hatch), bundled hand-drawn icons ship
+> as stroke skeletons behind `IconSource.builtIn(name:fallbackSymbol:)`, and
+> the theme is scoped through the environment — feature code and phase order
+> are otherwise unchanged. Phase 8 still owns the theme-flip setting,
+> user-drawn icons (`DrawIconView`), and whole-app hand-drawn coverage.
+
 ### Phase 9+ — Polish & CloudKit sync
 Daily-driver reliability; then CloudKit with per-stroke records keyed by UUID (last-writer-wins at stroke granularity to start).
 
